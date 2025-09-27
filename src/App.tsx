@@ -1,13 +1,14 @@
-import React, { useRef, useMemo, useState, useEffect } from 'react';
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls } from '@react-three/drei';
-import * as THREE from 'three';
+import React, { useRef, useMemo, useState, useEffect } from "react";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { OrbitControls } from "@react-three/drei";
+import * as THREE from "three";
 
 const vertexShader = `
   uniform float time;
   uniform float fieldSize;
   uniform float instanceCount;
   uniform vec3 spherePosition;
+  uniform vec3 oldestTrailPosition;
   varying vec2 vUv;
   varying vec3 vColor;
   varying vec3 vNormal;
@@ -46,6 +47,21 @@ const vertexShader = `
     vec2 u = f * f * (3.0 - 2.0 * f);
 
     return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+  }
+
+  // Function to calculate bending from any position
+  vec3 calculateBending(vec3 fromPosition, float strength, vec2 grassPos, float influenceRadius, float uvY) {
+    float distance = length(grassPos - fromPosition.xz);
+    if (distance < influenceRadius) {
+      float bendStrength = 1.0 - (distance / influenceRadius);
+      bendStrength = smoothstep(0.0, 1.0, bendStrength);
+
+      vec2 awayDirection = normalize(grassPos - fromPosition.xz);
+      float bendAmount = bendStrength * uvY * strength;
+
+      return vec3(awayDirection.x * bendAmount, 0.0, awayDirection.y * bendAmount);
+    }
+    return vec3(0.0);
   }
   
   void main() {
@@ -111,35 +127,51 @@ const vertexShader = `
 
     rotatedPos += initialBend;
 
-    // Sphere interaction - bend grass away from sphere
-    vec3 worldGrassPos = rotatedPos + grassPos;
-    vec3 toSphere = spherePosition - worldGrassPos;
-    float distanceToSphere = length(toSphere.xz); // Only use horizontal distance
+    // Line-based bending - bend away from the entire sphere trail line
+    vec3 sphereInfluence = vec3(0.0);
+    float influenceRadius = 1.75;
 
-    float influenceRadius = 1.75; // How far the sphere affects grass
+    vec2 lineStart = oldestTrailPosition.xz;
+    vec2 lineEnd = spherePosition.xz;
+    vec2 lineVector = lineEnd - lineStart;
+    float lineLength = length(lineVector);
 
-    if (distanceToSphere < influenceRadius) {
-      vec3 sphereInfluence = vec3(0.0);
-      // Near the sphere - bend away
-      float bendStrength = 1.0 - (distanceToSphere / influenceRadius);
-      bendStrength = smoothstep(0., 1.0, bendStrength);
+    if (lineLength > 0.1) {
+      vec2 lineDirection = lineVector / lineLength;
 
-      vec2 awayDirection = normalize(grassPos.xz - spherePosition.xz);
-      
-      // Calculate bend amount
-      float bendAmount = bendStrength * uv.y;
+      // Find closest point on line to grass position
+      vec2 toGrass = grassPos.xz - lineStart;
+      float projectionLength = dot(toGrass, lineDirection);
+      projectionLength = clamp(projectionLength, 0.0, lineLength);
 
-      // Apply horizontal bend
-      sphereInfluence.x = awayDirection.x * bendAmount;
-      sphereInfluence.z = awayDirection.y * bendAmount;
+      vec2 closestPointOnLine = lineStart + lineDirection * projectionLength;
+      float distanceToLine = length(grassPos.xz - closestPointOnLine);
 
-      // Compensate for length by reducing vertical height based on bend
-      float horizontalBend = length(sphereInfluence.xz);
-      float heightReduction = horizontalBend * horizontalBend * 0.3; // Quadratic falloff
-      sphereInfluence.y = -heightReduction * uv.y;
+      if (distanceToLine < influenceRadius) {
+        float bendStrength = 1.0 - (distanceToLine / influenceRadius);
+        bendStrength = smoothstep(0.0, 1.0, bendStrength);
 
-      rotatedPos += sphereInfluence;
+        // Add falloff based on position along the line
+        // 0.0 = oldest position (weak), 1.0 = current position (strong)
+        float positionAlongLine = projectionLength / lineLength;
+        float lineFalloff = smoothstep(0.0, 1.0, positionAlongLine);
+
+        bendStrength *= lineFalloff;
+
+        // Bend away from closest point on trail line
+        vec2 awayDirection = normalize(grassPos.xz - closestPointOnLine);
+        float bendAmount = bendStrength * uv.y;
+
+        sphereInfluence.x = awayDirection.x * bendAmount;
+        sphereInfluence.z = awayDirection.y * bendAmount;
+      }
     }
+
+    // Height compensation for bending
+    float horizontalBend = length(sphereInfluence.xz);
+    sphereInfluence.y = -horizontalBend * horizontalBend * 0.3 * uv.y;
+
+    rotatedPos += sphereInfluence;
 
     // Noise-based wind for realistic gusts
     float windSpeed = time * 2.0;
@@ -214,6 +246,7 @@ const vertexShader = `
     vColor = mix(baseColor * 0.4, tipColor, heightGradient);
 
     // Shadow effect from sphere
+    float distanceToSphere = length(grassPos.xz - spherePosition.xz);
     float shadowRadius = 2.; // Radius of shadow effect
     if (distanceToSphere < shadowRadius) {
       float shadowStrength = 1.0 - (distanceToSphere / shadowRadius);
@@ -282,7 +315,8 @@ function Grass({ spherePosition }) {
   const meshRef = useRef();
   const count = 150_000; // Number of grass blades (affects density only)
   const fieldSize = 50; // Size of grass field (always constant)
-  
+  const oldestTrailPosition = useRef(new THREE.Vector3(0, 1, 0));
+
   const geometry = useMemo(() => {
     // Create detailed blade geometry with more segments for LOD
     const geom = new THREE.PlaneGeometry(0.1, 0.6, 1, 8);
@@ -296,32 +330,51 @@ function Grass({ spherePosition }) {
       const uv_y = uvs[(i / 3) * 2 + 1];
 
       // Taper the blade towards the top to make it pointy
-      const taper = 1.0 - (uv_y * uv_y * 0.9); // Quadratic taper
+      const taper = 1.0 - uv_y * uv_y * 0.9; // Quadratic taper
       positions[i] *= taper; // Scale x position
     }
 
     geom.translate(0, 0.3, 0); // Move pivot to base
     return geom;
   }, []);
-  
-  const uniforms = useMemo(() => ({
-    time: { value: 0 },
-    fieldSize: { value: fieldSize },
-    instanceCount: { value: count },
-    spherePosition: { value: new THREE.Vector3(0, 1, 0) }
-  }), [count, fieldSize]);
-  
-  useFrame((state) => {
+
+  const uniforms = useMemo(
+    () => ({
+      time: { value: 0 },
+      fieldSize: { value: fieldSize },
+      instanceCount: { value: count },
+      spherePosition: { value: new THREE.Vector3(0, 1, 0) },
+      oldestTrailPosition: { value: new THREE.Vector3(0, 1, 0) },
+    }),
+    [count, fieldSize]
+  );
+
+  useFrame((state, delta) => {
     if (meshRef.current) {
       meshRef.current.material.uniforms.time.value = state.clock.elapsedTime;
+
       if (spherePosition) {
-        meshRef.current.material.uniforms.spherePosition.value.copy(spherePosition);
+        // Slowly move the oldest trail position towards current sphere position
+        // This creates a line that represents the sphere's path
+        oldestTrailPosition.current.lerp(spherePosition, delta * 0.75); // Even slower follow creates longer trail
+
+        // Update uniforms
+        meshRef.current.material.uniforms.spherePosition.value.copy(
+          spherePosition
+        );
+        meshRef.current.material.uniforms.oldestTrailPosition.value.copy(
+          oldestTrailPosition.current
+        );
       }
     }
   });
-  
+
   return (
-    <instancedMesh ref={meshRef} args={[geometry, null, count]} frustumCulled={false}>
+    <instancedMesh
+      ref={meshRef}
+      args={[geometry, null, count]}
+      frustumCulled={false}
+    >
       <shaderMaterial
         vertexShader={vertexShader}
         fragmentShader={fragmentShader}
@@ -352,19 +405,35 @@ function KineticSphere({ onPositionChange, groundRef }) {
   useEffect(() => {
     const handleKeyDown = (event) => {
       switch (event.code) {
-        case 'KeyW': keys.current.w = true; break;
-        case 'KeyA': keys.current.a = true; break;
-        case 'KeyS': keys.current.s = true; break;
-        case 'KeyD': keys.current.d = true; break;
+        case "KeyW":
+          keys.current.w = true;
+          break;
+        case "KeyA":
+          keys.current.a = true;
+          break;
+        case "KeyS":
+          keys.current.s = true;
+          break;
+        case "KeyD":
+          keys.current.d = true;
+          break;
       }
     };
 
     const handleKeyUp = (event) => {
       switch (event.code) {
-        case 'KeyW': keys.current.w = false; break;
-        case 'KeyA': keys.current.a = false; break;
-        case 'KeyS': keys.current.s = false; break;
-        case 'KeyD': keys.current.d = false; break;
+        case "KeyW":
+          keys.current.w = false;
+          break;
+        case "KeyA":
+          keys.current.a = false;
+          break;
+        case "KeyS":
+          keys.current.s = false;
+          break;
+        case "KeyD":
+          keys.current.d = false;
+          break;
       }
     };
 
@@ -377,16 +446,16 @@ function KineticSphere({ onPositionChange, groundRef }) {
       mouseTarget.current = null;
     };
 
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-    window.addEventListener('mousedown', handleMouseDown);
-    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("mousedown", handleMouseDown);
+    window.addEventListener("mouseup", handleMouseUp);
 
     return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-      window.removeEventListener('mousedown', handleMouseDown);
-      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("mousedown", handleMouseDown);
+      window.removeEventListener("mouseup", handleMouseUp);
     };
   }, []);
 
@@ -399,8 +468,8 @@ function KineticSphere({ onPositionChange, groundRef }) {
       const mouse = new THREE.Vector2();
 
       // Calculate mouse position in normalized device coordinates
-      mouse.x = (state.pointer.x);
-      mouse.y = (state.pointer.y);
+      mouse.x = state.pointer.x;
+      mouse.y = state.pointer.y;
 
       raycaster.setFromCamera(mouse, state.camera);
 
@@ -423,7 +492,9 @@ function KineticSphere({ onPositionChange, groundRef }) {
 
     // Apply mouse-directed force
     if (mouseTarget.current && isMousePressed.current) {
-      const direction = mouseTarget.current.clone().sub(meshRef.current.position);
+      const direction = mouseTarget.current
+        .clone()
+        .sub(meshRef.current.position);
       direction.y = 0; // Only horizontal movement
       direction.normalize();
 
@@ -436,7 +507,9 @@ function KineticSphere({ onPositionChange, groundRef }) {
     velocity.current.multiplyScalar(0.98); // Much less friction for longer coasting
 
     // Update position
-    meshRef.current.position.add(velocity.current.clone().multiplyScalar(delta));
+    meshRef.current.position.add(
+      velocity.current.clone().multiplyScalar(delta)
+    );
 
     // Keep sphere on ground
     meshRef.current.position.y = 1.0; // New sphere radius
@@ -444,7 +517,11 @@ function KineticSphere({ onPositionChange, groundRef }) {
     // Rotation based on movement
     const speed = velocity.current.length();
     if (speed > 0.05) {
-      const axis = new THREE.Vector3(-velocity.current.z, 0, velocity.current.x).normalize();
+      const axis = new THREE.Vector3(
+        -velocity.current.z,
+        0,
+        velocity.current.x
+      ).normalize();
       meshRef.current.rotateOnAxis(axis, speed * delta * 0.05);
     }
 
@@ -467,7 +544,7 @@ function CameraController({ spherePosition, cameraMode }) {
   const orbitRef = useRef();
 
   useFrame(() => {
-    if (cameraMode === 'third-person' && spherePosition) {
+    if (cameraMode === "third-person" && spherePosition) {
       // Third-person camera follows sphere - closer to ground
       const offset = new THREE.Vector3(0, 2.5, 6);
       const targetPosition = spherePosition.clone().add(offset);
@@ -477,7 +554,7 @@ function CameraController({ spherePosition, cameraMode }) {
     }
   });
 
-  return cameraMode === 'orbit' ? (
+  return cameraMode === "orbit" ? (
     <OrbitControls
       ref={orbitRef}
       minPolarAngle={0}
@@ -488,49 +565,62 @@ function CameraController({ spherePosition, cameraMode }) {
 }
 
 export default function App() {
-  console.log("rendering")
-  const [spherePosition, setSpherePosition] = useState(new THREE.Vector3(0, 1.0, 0));
-  const [cameraMode, setCameraMode] = useState('orbit'); // 'orbit' or 'third-person'
+  console.log("rendering");
+  const [spherePosition, setSpherePosition] = useState(
+    new THREE.Vector3(0, 1.0, 0)
+  );
+  const [cameraMode, setCameraMode] = useState("orbit"); // 'orbit' or 'third-person'
   const groundRef = useRef();
 
   useEffect(() => {
     const handleKeyDown = (event) => {
-      if (event.code === 'KeyC') {
-        setCameraMode(prev => prev === 'orbit' ? 'third-person' : 'orbit');
+      if (event.code === "KeyC") {
+        setCameraMode((prev) => (prev === "orbit" ? "third-person" : "orbit"));
       }
     };
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
   return (
-    <div style={{ width: '100vw', height: '100vh' }}>
-      <Canvas camera={{ position: [15, 10, 15], fov: 60 }}>
-        <color attach="background" args={['#87ceeb']} />
+    <div style={{ width: "100vw", height: "100vh" }}>
+      <Canvas camera={{ position: [0, 6, 25], fov: 60 }}>
+        <color attach="background" args={["#cdcdff"]} />
         <ambientLight intensity={0.2} />
         <directionalLight position={[10, 10, 5]} intensity={1} />
         <pointLight position={[0, 8, 0]} intensity={0.8} color="#ffffff" />
 
         <Ground ref={groundRef} />
         <Grass spherePosition={spherePosition} />
-        <KineticSphere onPositionChange={setSpherePosition} groundRef={groundRef} />
+        <KineticSphere
+          onPositionChange={setSpherePosition}
+          groundRef={groundRef}
+        />
 
-        <CameraController spherePosition={spherePosition} cameraMode={cameraMode} />
+        <CameraController
+          spherePosition={spherePosition}
+          cameraMode={cameraMode}
+        />
       </Canvas>
-      <div style={{
-        position: 'absolute',
-        top: 20,
-        left: 20,
-        color: 'white',
-        background: 'rgba(0,0,0,0.5)',
-        padding: '10px',
-        borderRadius: '5px',
-        fontFamily: 'monospace'
-      }}>
-        150,000 grass blades<br/>
-        Field size: 50x50 units<br/>
-        Camera: {cameraMode}<br/>
+      <div
+        style={{
+          position: "absolute",
+          top: 20,
+          left: 20,
+          color: "white",
+          background: "rgba(0,0,0,0.5)",
+          padding: "10px",
+          borderRadius: "5px",
+          fontFamily: "monospace",
+        }}
+      >
+        150,000 grass blades
+        <br />
+        Field size: 50x50 units
+        <br />
+        Camera: {cameraMode}
+        <br />
         Controls: WASD to move, C to toggle camera
       </div>
     </div>
