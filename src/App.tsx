@@ -1,5 +1,5 @@
-import { useRef, useMemo } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
+import React, { useRef, useMemo, useState, useEffect } from 'react';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 
@@ -7,6 +7,7 @@ const vertexShader = `
   uniform float time;
   uniform float fieldSize;
   uniform float instanceCount;
+  uniform vec3 spherePosition;
   varying vec2 vUv;
   varying vec3 vColor;
   varying vec3 vNormal;
@@ -63,7 +64,7 @@ const vertexShader = `
 
     // Random height and width variation
     vec2 sizeVars = hash22(vec2(idx * 0.0019, idx * 0.0023));
-    float heightVar = 0.5 + sizeVars.x * 0.8;
+    float heightVar = 1.25 + sizeVars.x * 0.8;
     float widthVar = 0.7 + sizeVars.y * 0.6;
 
     // Random initial bend - gives blades natural resting position
@@ -102,8 +103,43 @@ const vertexShader = `
     
     // Apply initial bend - affects entire blade but more at top
     float bendInfluence = uv.y * uv.y; // Quadratic curve for natural bend
-    rotatedPos.x += baseBendX * bendInfluence * heightVar;
-    rotatedPos.z += baseBendZ * bendInfluence * heightVar;
+    vec3 initialBend = vec3(baseBendX * bendInfluence * heightVar, 0.0, baseBendZ * bendInfluence * heightVar);
+
+    // Compensate for length due to initial bend
+    float initialBendLength = length(initialBend.xz);
+    initialBend.y = -initialBendLength * initialBendLength * 0.2 * uv.y;
+
+    rotatedPos += initialBend;
+
+    // Sphere interaction - bend grass away from sphere
+    vec3 worldGrassPos = rotatedPos + grassPos;
+    vec3 toSphere = spherePosition - worldGrassPos;
+    float distanceToSphere = length(toSphere.xz); // Only use horizontal distance
+
+    float influenceRadius = 1.75; // How far the sphere affects grass
+
+    if (distanceToSphere < influenceRadius) {
+      vec3 sphereInfluence = vec3(0.0);
+      // Near the sphere - bend away
+      float bendStrength = 1.0 - (distanceToSphere / influenceRadius);
+      bendStrength = smoothstep(0., 1.0, bendStrength);
+
+      vec2 awayDirection = normalize(grassPos.xz - spherePosition.xz);
+      
+      // Calculate bend amount
+      float bendAmount = bendStrength * uv.y;
+
+      // Apply horizontal bend
+      sphereInfluence.x = awayDirection.x * bendAmount;
+      sphereInfluence.z = awayDirection.y * bendAmount;
+
+      // Compensate for length by reducing vertical height based on bend
+      float horizontalBend = length(sphereInfluence.xz);
+      float heightReduction = horizontalBend * horizontalBend * 0.3; // Quadratic falloff
+      sphereInfluence.y = -heightReduction * uv.y;
+
+      rotatedPos += sphereInfluence;
+    }
 
     // Noise-based wind for realistic gusts
     float windSpeed = time * 2.0;
@@ -123,21 +159,70 @@ const vertexShader = `
 
     // Apply wind - stronger effect at blade tips
     float windInfluence = uv.y * uv.y * uv.y; // Cubic for more dramatic tip movement
-    rotatedPos.x += totalWind * windInfluence;
-    rotatedPos.z += totalWind * windInfluence * 0.3; // Less Z movement
+    vec3 windBend = vec3(totalWind * windInfluence, 0.0, totalWind * windInfluence * 0.3);
+
+    // Compensate for length due to wind bend
+    float windBendLength = length(windBend.xz);
+    windBend.y = -windBendLength * windBendLength * 0.1 * uv.y;
+
+    rotatedPos += windBend;
 
     // Final position
     vec3 finalPos = rotatedPos + grassPos;
     vWorldPosition = finalPos;
 
-    // Color variation with darker base
+    // Color variation with darker base and random hue shifts
     float colorVar = hash11(idx * 0.0031);
-    vec3 baseColor = mix(vec3(0.08, 0.25, 0.08), vec3(0.15, 0.5, 0.15), colorVar);
-    vec3 tipColor = mix(vec3(0.2, 0.6, 0.2), vec3(0.3, 0.8, 0.3), colorVar);
+    float hueVar = hash11(idx * 0.0053); // Additional randomness for hue
+    float satVar = hash11(idx * 0.0067); // Saturation variation
+
+    // Base green colors
+    vec3 baseGreen = vec3(0.08, 0.25, 0.08);
+    vec3 tipGreen = vec3(0.2, 0.6, 0.2);
+
+    // Variations: darker greens, yellower greens, and brighter greens - more prominent
+    vec3 darkGreen = vec3(0.03, 0.12, 0.03);
+    vec3 yellowGreen = vec3(0.22, 0.28, 0.06);
+    vec3 brightGreen = vec3(0.18, 0.45, 0.18);
+
+    vec3 darkTip = vec3(0.1, 0.35, 0.1);
+    vec3 yellowTip = vec3(0.5, 0.8, 0.15);
+    vec3 brightTip = vec3(0.35, 0.9, 0.35);
+
+    // Mix base colors based on hue variation
+    vec3 baseColor, tipColor;
+    if (hueVar < 0.3) {
+        // Darker green variation
+        baseColor = mix(baseGreen, darkGreen, satVar * 1.2);
+        tipColor = mix(tipGreen, darkTip, satVar * 1.2);
+    } else if (hueVar < 0.7) {
+        // Yellow-green variation
+        baseColor = mix(baseGreen, yellowGreen, satVar * 1.0);
+        tipColor = mix(tipGreen, yellowTip, satVar * 1.0);
+    } else {
+        // Brighter green variation
+        baseColor = mix(baseGreen, brightGreen, satVar * 1.2);
+        tipColor = mix(tipGreen, brightTip, satVar * 1.2);
+    }
+
+    // Final color mixing with original variation
+    baseColor = mix(baseColor, baseColor * 1.2, colorVar);
+    tipColor = mix(tipColor, tipColor * 1.2, colorVar);
 
     // Darker at base, brighter at tip
     float heightGradient = smoothstep(0.0, 0.8, uv.y);
     vColor = mix(baseColor * 0.4, tipColor, heightGradient);
+
+    // Shadow effect from sphere
+    float shadowRadius = 2.; // Radius of shadow effect
+    if (distanceToSphere < shadowRadius) {
+      float shadowStrength = 1.0 - (distanceToSphere / shadowRadius);
+      shadowStrength = smoothstep(0.0, 1.0, shadowStrength);
+
+      // Darken the grass based on proximity to sphere
+      float darkenAmount = shadowStrength * 0.6; // 60% darker at maximum
+      vColor *= (1.0 - darkenAmount);
+    }
 
     // Calculate rounded normal for cylindrical appearance
     vec3 localNormal = normal;
@@ -169,7 +254,7 @@ const fragmentShader = `
     vec3 viewDir = normalize(cameraPosition - vWorldPosition);
     vec3 halfwayDir = normalize(lightDir + viewDir);
     float NdotH = max(dot(normal, halfwayDir), 0.0);
-    float specular = pow(NdotH, 40.0) * 0.3; // Shininess = 32, intensity = 0.3
+    float specular = pow(NdotH, 64.0) * 0.8; // Higher shininess and intensity for stronger highlights
 
     // Combine lighting
     float lighting = 0.4 + 0.6 * NdotL; // Ambient + diffuse
@@ -193,7 +278,7 @@ const fragmentShader = `
   }
 `;
 
-function Grass() {
+function Grass({ spherePosition }) {
   const meshRef = useRef();
   const count = 150_000; // Number of grass blades (affects density only)
   const fieldSize = 50; // Size of grass field (always constant)
@@ -222,17 +307,21 @@ function Grass() {
   const uniforms = useMemo(() => ({
     time: { value: 0 },
     fieldSize: { value: fieldSize },
-    instanceCount: { value: count }
+    instanceCount: { value: count },
+    spherePosition: { value: new THREE.Vector3(0, 1, 0) }
   }), [count, fieldSize]);
   
   useFrame((state) => {
     if (meshRef.current) {
       meshRef.current.material.uniforms.time.value = state.clock.elapsedTime;
+      if (spherePosition) {
+        meshRef.current.material.uniforms.spherePosition.value.copy(spherePosition);
+      }
     }
   });
   
   return (
-    <instancedMesh ref={meshRef} args={[geometry, null, count]}>
+    <instancedMesh ref={meshRef} args={[geometry, null, count]} frustumCulled={false}>
       <shaderMaterial
         vertexShader={vertexShader}
         fragmentShader={fragmentShader}
@@ -244,31 +333,190 @@ function Grass() {
   );
 }
 
-function Ground() {
+const Ground = React.forwardRef((props, ref) => {
   return (
-    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.01, 0]}>
+    <mesh ref={ref} rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.01, 0]}>
       <planeGeometry args={[50, 50]} />
       <meshStandardMaterial color="#2d5016" />
     </mesh>
   );
+});
+
+function KineticSphere({ onPositionChange, groundRef }) {
+  const meshRef = useRef();
+  const velocity = useRef(new THREE.Vector3());
+  const keys = useRef({ w: false, a: false, s: false, d: false });
+  const mouseTarget = useRef(null);
+  const isMousePressed = useRef(false);
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      switch (event.code) {
+        case 'KeyW': keys.current.w = true; break;
+        case 'KeyA': keys.current.a = true; break;
+        case 'KeyS': keys.current.s = true; break;
+        case 'KeyD': keys.current.d = true; break;
+      }
+    };
+
+    const handleKeyUp = (event) => {
+      switch (event.code) {
+        case 'KeyW': keys.current.w = false; break;
+        case 'KeyA': keys.current.a = false; break;
+        case 'KeyS': keys.current.s = false; break;
+        case 'KeyD': keys.current.d = false; break;
+      }
+    };
+
+    const handleMouseDown = (event) => {
+      isMousePressed.current = true;
+    };
+
+    const handleMouseUp = (event) => {
+      isMousePressed.current = false;
+      mouseTarget.current = null;
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('mousedown', handleMouseDown);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
+
+  useFrame((state, delta) => {
+    if (!meshRef.current) return;
+
+    // Handle mouse raycasting for ground clicks
+    if (isMousePressed.current && groundRef?.current) {
+      const raycaster = new THREE.Raycaster();
+      const mouse = new THREE.Vector2();
+
+      // Calculate mouse position in normalized device coordinates
+      mouse.x = (state.pointer.x);
+      mouse.y = (state.pointer.y);
+
+      raycaster.setFromCamera(mouse, state.camera);
+
+      // Intersect with ground mesh
+      const intersects = raycaster.intersectObject(groundRef.current);
+
+      if (intersects.length > 0) {
+        mouseTarget.current = intersects[0].point;
+      }
+    }
+
+    const force = new THREE.Vector3();
+    const forceStrength = 8; // Reduced for heavier feel
+
+    // Apply forces based on key input
+    if (keys.current.w) force.z -= forceStrength;
+    if (keys.current.s) force.z += forceStrength;
+    if (keys.current.a) force.x -= forceStrength;
+    if (keys.current.d) force.x += forceStrength;
+
+    // Apply mouse-directed force
+    if (mouseTarget.current && isMousePressed.current) {
+      const direction = mouseTarget.current.clone().sub(meshRef.current.position);
+      direction.y = 0; // Only horizontal movement
+      direction.normalize();
+
+      // Use same force strength as keyboard
+      force.add(direction.multiplyScalar(forceStrength));
+    }
+
+    // Apply physics with more momentum
+    velocity.current.add(force.multiplyScalar(delta));
+    velocity.current.multiplyScalar(0.98); // Much less friction for longer coasting
+
+    // Update position
+    meshRef.current.position.add(velocity.current.clone().multiplyScalar(delta));
+
+    // Keep sphere on ground
+    meshRef.current.position.y = 1.0; // New sphere radius
+
+    // Rotation based on movement
+    const speed = velocity.current.length();
+    if (speed > 0.05) {
+      const axis = new THREE.Vector3(-velocity.current.z, 0, velocity.current.x).normalize();
+      meshRef.current.rotateOnAxis(axis, speed * delta * 0.05);
+    }
+
+    // Notify parent of position change
+    if (onPositionChange) {
+      onPositionChange(meshRef.current.position);
+    }
+  });
+
+  return (
+    <mesh ref={meshRef} position={[0, 1.0, 0]}>
+      <sphereGeometry args={[1.0, 32, 32]} />
+      <meshPhongMaterial color="#ff6b6b" shininess={300} />
+    </mesh>
+  );
+}
+
+function CameraController({ spherePosition, cameraMode }) {
+  const { camera } = useThree();
+  const orbitRef = useRef();
+
+  useFrame(() => {
+    if (cameraMode === 'third-person' && spherePosition) {
+      // Third-person camera follows sphere - closer to ground
+      const offset = new THREE.Vector3(0, 2.5, 6);
+      const targetPosition = spherePosition.clone().add(offset);
+
+      camera.position.lerp(targetPosition, 0.1);
+      camera.lookAt(spherePosition.x, spherePosition.y, spherePosition.z);
+    }
+  });
+
+  return cameraMode === 'orbit' ? (
+    <OrbitControls
+      ref={orbitRef}
+      minPolarAngle={0}
+      maxPolarAngle={Math.PI / 2.1}
+      enableDamping
+    />
+  ) : null;
 }
 
 export default function App() {
+  console.log("rendering")
+  const [spherePosition, setSpherePosition] = useState(new THREE.Vector3(0, 1.0, 0));
+  const [cameraMode, setCameraMode] = useState('orbit'); // 'orbit' or 'third-person'
+  const groundRef = useRef();
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (event.code === 'KeyC') {
+        setCameraMode(prev => prev === 'orbit' ? 'third-person' : 'orbit');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   return (
     <div style={{ width: '100vw', height: '100vh' }}>
       <Canvas camera={{ position: [15, 10, 15], fov: 60 }}>
         <color attach="background" args={['#87ceeb']} />
-        <ambientLight intensity={0.6} />
+        <ambientLight intensity={0.2} />
         <directionalLight position={[10, 10, 5]} intensity={1} />
-        
-        <Ground />
-        <Grass />
-        
-        <OrbitControls 
-          minPolarAngle={0}
-          maxPolarAngle={Math.PI / 2.1}
-          enableDamping
-        />
+        <pointLight position={[0, 8, 0]} intensity={0.8} color="#ffffff" />
+
+        <Ground ref={groundRef} />
+        <Grass spherePosition={spherePosition} />
+        <KineticSphere onPositionChange={setSpherePosition} groundRef={groundRef} />
+
+        <CameraController spherePosition={spherePosition} cameraMode={cameraMode} />
       </Canvas>
       <div style={{
         position: 'absolute',
@@ -280,8 +528,10 @@ export default function App() {
         borderRadius: '5px',
         fontFamily: 'monospace'
       }}>
-        1,000,000 grass blades<br/>
-        Field size: 50x50 units
+        150,000 grass blades<br/>
+        Field size: 50x50 units<br/>
+        Camera: {cameraMode}<br/>
+        Controls: WASD to move, C to toggle camera
       </div>
     </div>
   );
