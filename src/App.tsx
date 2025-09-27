@@ -127,7 +127,7 @@ const vertexShader = `
 
     rotatedPos += initialBend;
 
-    // Line-based bending - bend away from the entire sphere trail line
+    // Line-based bending - optimized without conditionals
     vec3 sphereInfluence = vec3(0.0);
     float influenceRadius = 1.75;
 
@@ -136,36 +136,37 @@ const vertexShader = `
     vec2 lineVector = lineEnd - lineStart;
     float lineLength = length(lineVector);
 
-    if (lineLength > 0.1) {
-      vec2 lineDirection = lineVector / lineLength;
+    // Avoid division by zero with max
+    float safeLineLength = max(lineLength, 0.001);
+    vec2 lineDirection = lineVector / safeLineLength;
 
-      // Find closest point on line to grass position
-      vec2 toGrass = grassPos.xz - lineStart;
-      float projectionLength = dot(toGrass, lineDirection);
-      projectionLength = clamp(projectionLength, 0.0, lineLength);
+    // Find closest point on line to grass position
+    vec2 toGrass = grassPos.xz - lineStart;
+    float projectionLength = clamp(dot(toGrass, lineDirection), 0.0, safeLineLength);
+    vec2 closestPointOnLine = lineStart + lineDirection * projectionLength;
+    float distanceToLine = length(grassPos.xz - closestPointOnLine);
 
-      vec2 closestPointOnLine = lineStart + lineDirection * projectionLength;
-      float distanceToLine = length(grassPos.xz - closestPointOnLine);
+    // Use step functions instead of conditionals
+    float lineValid = step(0.1, lineLength);
+    float inRange = 1.0 - step(influenceRadius, distanceToLine);
+    float isActive = lineValid * inRange;
 
-      if (distanceToLine < influenceRadius) {
-        float bendStrength = 1.0 - (distanceToLine / influenceRadius);
-        bendStrength = smoothstep(0.0, 1.0, bendStrength);
+    float bendStrength = (1.0 - (distanceToLine / influenceRadius)) * isActive;
+    bendStrength = smoothstep(0.0, 1.0, bendStrength);
 
-        // Add falloff based on position along the line
-        // 0.0 = oldest position (weak), 1.0 = current position (strong)
-        float positionAlongLine = projectionLength / lineLength;
-        float lineFalloff = smoothstep(0.0, 1.0, positionAlongLine);
+    // Position-based falloff
+    float positionAlongLine = projectionLength / safeLineLength;
+    float lineFalloff = smoothstep(0.0, 1.0, positionAlongLine);
+    bendStrength *= lineFalloff;
 
-        bendStrength *= lineFalloff;
+    // Bend calculation
+    vec2 toPoint = grassPos.xz - closestPointOnLine;
+    float pointDistance = length(toPoint);
+    vec2 awayDirection = toPoint / max(pointDistance, 0.001);
+    float bendAmount = bendStrength * uv.y;
 
-        // Bend away from closest point on trail line
-        vec2 awayDirection = normalize(grassPos.xz - closestPointOnLine);
-        float bendAmount = bendStrength * uv.y;
-
-        sphereInfluence.x = awayDirection.x * bendAmount;
-        sphereInfluence.z = awayDirection.y * bendAmount;
-      }
-    }
+    sphereInfluence.x = awayDirection.x * bendAmount;
+    sphereInfluence.z = awayDirection.y * bendAmount;
 
     // Height compensation for bending
     float horizontalBend = length(sphereInfluence.xz);
@@ -221,21 +222,23 @@ const vertexShader = `
     vec3 yellowTip = vec3(0.5, 0.8, 0.15);
     vec3 brightTip = vec3(0.35, 0.9, 0.35);
 
-    // Mix base colors based on hue variation
-    vec3 baseColor, tipColor;
-    if (hueVar < 0.3) {
-        // Darker green variation
-        baseColor = mix(baseGreen, darkGreen, satVar * 1.2);
-        tipColor = mix(tipGreen, darkTip, satVar * 1.2);
-    } else if (hueVar < 0.7) {
-        // Yellow-green variation
-        baseColor = mix(baseGreen, yellowGreen, satVar * 1.0);
-        tipColor = mix(tipGreen, yellowTip, satVar * 1.0);
-    } else {
-        // Brighter green variation
-        baseColor = mix(baseGreen, brightGreen, satVar * 1.2);
-        tipColor = mix(tipGreen, brightTip, satVar * 1.2);
-    }
+    // Mix base colors without conditionals - use step functions
+    float isDark = step(hueVar, 0.3);
+    float isYellow = step(hueVar, 0.7) * (1.0 - isDark);
+    float isBright = 1.0 - step(hueVar, 0.7);
+
+    // Blend colors based on category weights
+    vec3 darkBase = mix(baseGreen, darkGreen, satVar * 1.2);
+    vec3 darkTipCol = mix(tipGreen, darkTip, satVar * 1.2);
+
+    vec3 yellowBase = mix(baseGreen, yellowGreen, satVar);
+    vec3 yellowTipCol = mix(tipGreen, yellowTip, satVar);
+
+    vec3 brightBase = mix(baseGreen, brightGreen, satVar * 1.2);
+    vec3 brightTipCol = mix(tipGreen, brightTip, satVar * 1.2);
+
+    vec3 baseColor = darkBase * isDark + yellowBase * isYellow + brightBase * isBright;
+    vec3 tipColor = darkTipCol * isDark + yellowTipCol * isYellow + brightTipCol * isBright;
 
     // Final color mixing with original variation
     baseColor = mix(baseColor, baseColor * 1.2, colorVar);
@@ -245,17 +248,18 @@ const vertexShader = `
     float heightGradient = smoothstep(0.0, 0.8, uv.y);
     vColor = mix(baseColor * 0.4, tipColor, heightGradient);
 
-    // Shadow effect from sphere
+    // Shadow effect from sphere - optimized without conditionals
     float distanceToSphere = length(grassPos.xz - spherePosition.xz);
-    float shadowRadius = 2.; // Radius of shadow effect
-    if (distanceToSphere < shadowRadius) {
-      float shadowStrength = 1.0 - (distanceToSphere / shadowRadius);
-      shadowStrength = smoothstep(0.0, 1.0, shadowStrength);
+    float shadowRadius = 2.0;
 
-      // Darken the grass based on proximity to sphere
-      float darkenAmount = shadowStrength * 0.8; // 60% darker at maximum
-      vColor *= (1.0 - darkenAmount);
-    }
+    // Use step and clamp instead of conditional
+    float inShadowRange = 1.0 - step(shadowRadius, distanceToSphere);
+    float shadowStrength = clamp(1.0 - (distanceToSphere / shadowRadius), 0.0, 1.0) * inShadowRange;
+    shadowStrength = smoothstep(0.0, 1.0, shadowStrength);
+
+    // Apply shadow unconditionally
+    float darkenAmount = shadowStrength * 0.8;
+    vColor *= (1.0 - darkenAmount);
 
     // Calculate rounded normal for cylindrical appearance
     vec3 localNormal = normal;
@@ -592,7 +596,7 @@ export default function App() {
 
   return (
     <div style={{ width: "100vw", height: "100vh" }}>
-      <Canvas camera={{ position: [0, 6, 25], fov: 60 }}>
+      <Canvas camera={{ position: [55, 30, 55], fov: 20 }}>
         <color attach="background" args={["#c2e2ff"]} />
         <ambientLight intensity={0.2} />
         <directionalLight position={[10, 10, 5]} intensity={1} />
@@ -622,13 +626,15 @@ export default function App() {
           fontFamily: "monospace",
         }}
       >
-        150,000 grass blades
+        Grass field and ball
         <br />
-        Field size: 50x50 units
+        By Tobias and Claude
         <br />
         Camera: {cameraMode}
         <br />
-        Controls: WASD to move, C to toggle camera
+        Controls: WASD or mouse to move, 
+        <br />
+        C to toggle camera
       </div>
     </div>
   );
