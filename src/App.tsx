@@ -253,7 +253,7 @@ const vertexShader = `
       shadowStrength = smoothstep(0.0, 1.0, shadowStrength);
 
       // Darken the grass based on proximity to sphere
-      float darkenAmount = shadowStrength * 0.6; // 60% darker at maximum
+      float darkenAmount = shadowStrength * 0.8; // 60% darker at maximum
       vColor *= (1.0 - darkenAmount);
     }
 
@@ -261,7 +261,7 @@ const vertexShader = `
     vec3 localNormal = normal;
     // Create rounded effect by modifying normal based on UV.x position
     float roundness = (uv.x - 0.5) * 2.0; // -1 to 1 across width
-    localNormal.x = roundness * 0.8; // Curve the normal
+    localNormal.x = roundness * 0.75; // Curve the normal
     localNormal = normalize(localNormal);
 
     // Transform normal to world space (simplified)
@@ -283,11 +283,17 @@ const fragmentShader = `
     vec3 normal = normalize(vNormal);
     float NdotL = max(dot(normal, lightDir), 0.0);
 
-    // Specular calculation
+    // Specular calculation - intense highlights on blade tips
     vec3 viewDir = normalize(cameraPosition - vWorldPosition);
     vec3 halfwayDir = normalize(lightDir + viewDir);
     float NdotH = max(dot(normal, halfwayDir), 0.0);
-    float specular = pow(NdotH, 64.0) * 0.8; // Higher shininess and intensity for stronger highlights
+
+    // Much more intense specular, especially at blade tips
+    float specular = pow(NdotH, 128.0) * 2.0; // Very high shininess and intensity
+
+    // Amplify specular at blade tips
+    float tipMultiplier = smoothstep(0.3, 1.0, vUv.y); // More specular toward tips
+    specular *= (1.0 + tipMultiplier * 3.0); // Up to 4x specular at tips
 
     // Combine lighting
     float lighting = 0.4 + 0.6 * NdotL; // Ambient + diffuse
@@ -534,7 +540,8 @@ function KineticSphere({ onPositionChange, groundRef }) {
   return (
     <mesh ref={meshRef} position={[0, 1.0, 0]}>
       <sphereGeometry args={[1.0, 32, 32]} />
-      <meshPhongMaterial color="#ff6b6b" shininess={300} />
+      <meshPhongMaterial shininess={350} color="#F44"
+      />
     </mesh>
   );
 }
@@ -586,7 +593,7 @@ export default function App() {
   return (
     <div style={{ width: "100vw", height: "100vh" }}>
       <Canvas camera={{ position: [0, 6, 25], fov: 60 }}>
-        <color attach="background" args={["#cdcdff"]} />
+        <color attach="background" args={["#c2e2ff"]} />
         <ambientLight intensity={0.2} />
         <directionalLight position={[10, 10, 5]} intensity={1} />
         <pointLight position={[0, 8, 0]} intensity={0.8} color="#ffffff" />
