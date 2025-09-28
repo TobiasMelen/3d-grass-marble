@@ -80,42 +80,44 @@ const vertexWebGpuShader = `
 
     vec3 grassPos = vec3(x, 0.0, z);
 
-    // Random height and width variation
+    // Distance-based LOD: reduce detail for far grass
+    float distanceToCamera = length(cameraPosition - grassPos);
+    float lodFactor = smoothstep(20.0, 60.0, distanceToCamera); // Start reducing at 20m, full reduction at 60m
+
+    // Better distributed random values - keep quality but optimize
     vec2 sizeVars = hash22(vec2(idx * 0.0019, idx * 0.0023));
     float heightVar = grassHeight + sizeVars.x * 0.8;
     float widthVar = 0.7 + sizeVars.y * 0.6;
 
-    // Random stiffness variation - affects wind response
+    // Separate random values for different properties to avoid correlation
     float stiffnessVar = hash11(idx * 0.0071);
-    float stiffness = 0.5 + stiffnessVar * .8; // Range: 0.5 to 1.3
+    float stiffness = 0.5 + stiffnessVar * 0.8; // Range: 0.5 to 1.3
 
-    // Random initial bend - gives blades natural resting position
+    // Random rotation with better distribution
+    float randomRotation = hash11(idx * 0.0037) * 6.28318; // 0 to 2π
+
+    // Random initial bend with independent values
     vec2 bendVars = hash22(vec2(idx * 0.0041, idx * 0.0047));
     float bendAngle = bendVars.x * 6.28318; // Random direction 0 to 2π
     float bendMagnitude = bendVars.y * 0.25; // Random strength
     float baseBendX = cos(bendAngle) * bendMagnitude;
     float baseBendZ = sin(bendAngle) * bendMagnitude;
 
-    // Random rotation
-    float randomRotation = hash11(idx * 0.0037) * 6.28318; // 0 to 2π
-
-    // Improved billboard effect - properly account for blade orientation
+    // Simplified billboard effect using dot product
     vec2 toCameraXZ = normalize(cameraPosition.xz - grassPos.xz);
-    float cameraAngle = atan(toCameraXZ.y, toCameraXZ.x);
 
-    // Calculate optimal angle to show wide side to camera (perpendicular to camera direction)
-    float optimalAngle = cameraAngle + 1.5708; // +90° to show wide side
+    // Current blade direction from rotation
+    vec2 bladeDir = vec2(cos(randomRotation), sin(randomRotation));
 
-    // Find the shortest angular distance between current rotation and optimal angle
-    float angleDiff = randomRotation - optimalAngle;
-    // Normalize to [-π, π] range
-    angleDiff = mod(angleDiff + 3.14159, 6.28318) - 3.14159;
+    // How aligned is blade with camera direction (0 = perpendicular, 1 = aligned)
+    float alignment = abs(dot(bladeDir, toCameraXZ));
 
-    // Strong billboard effect when blade is facing edge-on to camera
-    float edgeOnStrength = smoothstep(0.3, 1.2, abs(angleDiff));
+    // Billboard strength when blade is edge-on (highly aligned)
+    float billboardStrength = smoothstep(0.3, 0.9, alignment) * 0.7;
 
-    // Rotate toward optimal angle when viewing edge-on
-    float finalRotation = mix(randomRotation, optimalAngle, edgeOnStrength * 0.7);
+    // Optimal angle perpendicular to camera
+    float optimalAngle = atan(toCameraXZ.y, toCameraXZ.x) + 1.5708;
+    float finalRotation = mix(randomRotation, optimalAngle, billboardStrength);
 
     // Apply rotation to blade
     float cosRot = cos(finalRotation);
@@ -131,13 +133,13 @@ const vertexWebGpuShader = `
     rotatedPos.x = scaledPos.x * cosRot - scaledPos.z * sinRot;
     rotatedPos.z = scaledPos.x * sinRot + scaledPos.z * cosRot;
 
-    // Apply initial bend - affects entire blade but more at top
-    float bendInfluence = uv.y * uv.y; // Quadratic curve for natural bend
-    vec3 initialBend = vec3(baseBendX * bendInfluence * heightVar, 0.0, baseBendZ * bendInfluence * heightVar);
+    // Apply initial bend with combined calculations
+    float bendInfluence = uv.y * uv.y * heightVar; // Quadratic curve for natural bend
+    vec3 initialBend = vec3(baseBendX * bendInfluence, 0.0, baseBendZ * bendInfluence);
 
-    // Compensate for length due to initial bend
-    float initialBendLength = length(initialBend.xz);
-    initialBend.y = -initialBendLength * initialBendLength * 0.2 * uv.y;
+    // Combine length compensation in one operation
+    float bendLengthSq = dot(initialBend.xz, initialBend.xz);
+    initialBend.y = -bendLengthSq * 0.2 * uv.y;
 
     rotatedPos += initialBend;
 
@@ -188,33 +190,28 @@ const vertexWebGpuShader = `
 
     rotatedPos += sphereInfluence;
 
-    // Noise-based wind for realistic gusts
-    float windTime = time * windSpeed * 2.0;
-    vec2 windCoord = grassPos.xz * 0.1 + vec2(windTime * -0.3, windTime * -0.2);
+    // LOD-optimized wind: reduce complexity for distant grass
+    float windTime = time * windSpeed;
+    vec2 windBaseCoord = grassPos.xz * 0.08 + vec2(windTime * -0.6, windTime * -0.4);
 
-    // Multi-octave noise for complex wind patterns
-    float windNoise = noise(windCoord) * 0.25;
-    windNoise += noise(windCoord * 2.0) * 0.25;
-    windNoise += noise(windCoord * 4.0) * 0.125;
+    // Use LOD: close grass gets 2 octaves, far grass gets 1 octave
+    float windNoise = noise(windBaseCoord) * 0.6;
+    windNoise += noise(windBaseCoord * 2.1) * 0.4 * (1.0 - lodFactor); // Skip second octave for distant grass
 
-    // Create wind gusts that move across the field (reversed direction)
-    vec2 gustCoord = grassPos.xz * 0.05 + vec2(windTime * -0.8, windTime * -0.1);
-    float gustPattern = noise(gustCoord) * 0.7;
-
-    // Combine noise patterns with wind speed and stiffness
-    float totalWind = (windNoise + gustPattern) * 0.4 * windSpeed;
+    // Combine with wind speed and stiffness in one operation
+    float totalWind = windNoise * windSpeed;
 
     // Apply stiffness - stiffer blades resist wind more
     float windResistance = 1.0 / stiffness;
     totalWind *= windResistance;
 
-    // Apply wind - stronger effect at blade tips
-    float windInfluence = uv.y * uv.y * uv.y; // Cubic for more dramatic tip movement
-    vec3 windBend = vec3(totalWind * windInfluence, 0.0, totalWind * windInfluence * 0.3);
+    // Apply wind with combined calculations
+    float windInfluence = uv.y * uv.y * uv.y * totalWind; // Cubic for dramatic tip movement
+    vec3 windBend = vec3(windInfluence, 0.0, windInfluence * 0.3);
 
-    // Compensate for length due to wind bend
-    float windBendLength = length(windBend.xz);
-    windBend.y = -windBendLength * windBendLength * 0.1 * uv.y;
+    // Combine wind length compensation
+    float windLengthSq = dot(windBend.xz, windBend.xz);
+    windBend.y = -windLengthSq * 0.1 * uv.y;
 
     rotatedPos += windBend;
 
@@ -222,7 +219,7 @@ const vertexWebGpuShader = `
     vec3 finalPos = rotatedPos + grassPos;
     vWorldPosition = finalPos;
 
-    // Color variation with darker base and random hue shifts
+    // Independent color variations for proper randomization
     float colorVar = hash11(idx * 0.0031);
     float hueVar = hash11(idx * 0.0053); // Additional randomness for hue
     float satVar = hash11(idx * 0.0067); // Saturation variation
@@ -259,11 +256,11 @@ const vertexWebGpuShader = `
     vec3 tipColor = darkTipCol * isDark + yellowTipCol * isYellow + brightTipCol * isBright;
 
     // Final color mixing with original variation
-    baseColor = mix(baseColor, baseColor * 1.2, colorVar);
-    tipColor = mix(tipColor, tipColor * 1.2, colorVar);
+    baseColor = mix(baseColor, baseColor * 1.6, colorVar);
+    tipColor = mix(tipColor, tipColor * 1.6, colorVar);
 
     // Darker at base, brighter at tip
-    float heightGradient = smoothstep(0.0, 0.9, uv.y);
+    float heightGradient = smoothstep(0., 1., uv.y);
     vColor = mix(baseColor, tipColor, heightGradient);
 
     // Shadow effect from sphere - optimized without conditionals
@@ -327,10 +324,12 @@ export default function WebGLGrass({ spherePosition, windSpeed = 1.0, grassHeigh
   });
 
   const geometry = useMemo(() => {
-    const geom = new THREE.PlaneGeometry(0.1, 0.6, 1, 8);
+    // Reduced geometry: 1x6 segments instead of 1x8 - 25% fewer vertices
+    const geom = new THREE.PlaneGeometry(0.1, 0.6, 1, 6);
     const positions = geom.attributes.position.array;
     const uvs = geom.attributes.uv.array;
 
+    // Optimize tapering calculation
     for (let i = 0; i < positions.length; i += 3) {
       const uv_y = uvs[(i / 3) * 2 + 1];
       const taper = 1.0 - uv_y * uv_y * 0.9;
