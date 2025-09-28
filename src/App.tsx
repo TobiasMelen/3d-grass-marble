@@ -236,6 +236,9 @@ export default function App() {
     <div style={{ width: "100vw", height: "100vh" }}>
       <Canvas
         camera={{ position: [55, 30, 55], fov: 20 }}
+        style={{
+          userSelect: "none",
+        }}
         gl={{
           antialias: true,
           alpha: false,
