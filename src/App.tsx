@@ -4,7 +4,6 @@ import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import { useControls } from "leva";
 import WebGLGrass from "./WebGLGrass";
-import WebGpuGrass from "./WebGpuGrass";
 
 const Ground = React.forwardRef(({ fieldSize = 50 }, ref) => {
   return (
