@@ -262,7 +262,7 @@ const vertexWebGpuShader = `
 
     // Shadow effect from sphere - optimized without conditionals
     float distanceToSphere = length(grassPos.xz - spherePosition.xz);
-    float shadowRadius = 1.4;
+    float shadowRadius = 1.65;
 
     // Use step and clamp instead of conditional
     float inShadowRange = 1.0 - step(shadowRadius, distanceToSphere);
