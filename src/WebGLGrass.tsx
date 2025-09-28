@@ -7,6 +7,8 @@ const vertexWebGpuShader = `
   uniform float time;
   uniform float fieldSize;
   uniform float instanceCount;
+  uniform float windSpeed;
+  uniform float grassHeight;
   uniform vec3 spherePosition;
   uniform vec3 oldestTrailPosition;
   varying vec2 vUv;
@@ -80,8 +82,12 @@ const vertexWebGpuShader = `
 
     // Random height and width variation
     vec2 sizeVars = hash22(vec2(idx * 0.0019, idx * 0.0023));
-    float heightVar = 1.25 + sizeVars.x * 0.8;
+    float heightVar = grassHeight + sizeVars.x * 0.8;
     float widthVar = 0.7 + sizeVars.y * 0.6;
+
+    // Random stiffness variation - affects wind response
+    float stiffnessVar = hash11(idx * 0.0071);
+    float stiffness = 0.5 + stiffnessVar * .8; // Range: 0.5 to 1.3
 
     // Random initial bend - gives blades natural resting position
     vec2 bendVars = hash22(vec2(idx * 0.0041, idx * 0.0047));
@@ -93,15 +99,23 @@ const vertexWebGpuShader = `
     // Random rotation
     float randomRotation = hash11(idx * 0.0037) * 6.28318; // 0 to 2π
 
-    // Camera-facing calculation with falloff
-    vec3 toCameraDir = normalize(cameraPosition - grassPos);
-    vec3 bladeForward = vec3(sin(randomRotation), 0.0, cos(randomRotation));
-    vec2 cameraDirXZ = normalize(toCameraDir.xz);
-    float facingDot = bladeForward.x * cameraDirXZ.x + bladeForward.z * cameraDirXZ.y;
+    // Improved billboard effect - properly account for blade orientation
+    vec2 toCameraXZ = normalize(cameraPosition.xz - grassPos.xz);
+    float cameraAngle = atan(toCameraXZ.y, toCameraXZ.x);
 
-    // Soft billboard effect - only when almost facing camera
-    float billboardStrength = smoothstep(0.3, 0.8, abs(facingDot));
-    float finalRotation = mix(randomRotation, atan(toCameraDir.x, toCameraDir.z), billboardStrength * 0.6);
+    // Calculate optimal angle to show wide side to camera (perpendicular to camera direction)
+    float optimalAngle = cameraAngle + 1.5708; // +90° to show wide side
+
+    // Find the shortest angular distance between current rotation and optimal angle
+    float angleDiff = randomRotation - optimalAngle;
+    // Normalize to [-π, π] range
+    angleDiff = mod(angleDiff + 3.14159, 6.28318) - 3.14159;
+
+    // Strong billboard effect when blade is facing edge-on to camera
+    float edgeOnStrength = smoothstep(0.3, 1.2, abs(angleDiff));
+
+    // Rotate toward optimal angle when viewing edge-on
+    float finalRotation = mix(randomRotation, optimalAngle, edgeOnStrength * 0.7);
 
     // Apply rotation to blade
     float cosRot = cos(finalRotation);
@@ -175,20 +189,24 @@ const vertexWebGpuShader = `
     rotatedPos += sphereInfluence;
 
     // Noise-based wind for realistic gusts
-    float windSpeed = time * 2.0;
-    vec2 windCoord = grassPos.xz * 0.1 + vec2(windSpeed * 0.3, windSpeed * 0.2);
+    float windTime = time * windSpeed * 2.0;
+    vec2 windCoord = grassPos.xz * 0.1 + vec2(windTime * -0.3, windTime * -0.2);
 
     // Multi-octave noise for complex wind patterns
     float windNoise = noise(windCoord) * 0.25;
     windNoise += noise(windCoord * 2.0) * 0.25;
     windNoise += noise(windCoord * 4.0) * 0.125;
 
-    // Create wind gusts that move across the field
-    vec2 gustCoord = grassPos.xz * 0.05 + vec2(windSpeed * 0.8, windSpeed * 0.1);
+    // Create wind gusts that move across the field (reversed direction)
+    vec2 gustCoord = grassPos.xz * 0.05 + vec2(windTime * -0.8, windTime * -0.1);
     float gustPattern = noise(gustCoord) * 0.7;
 
-    // Combine noise patterns
-    float totalWind = (windNoise + gustPattern) * 0.4;
+    // Combine noise patterns with wind speed and stiffness
+    float totalWind = (windNoise + gustPattern) * 0.4 * windSpeed;
+
+    // Apply stiffness - stiffer blades resist wind more
+    float windResistance = 1.0 / stiffness;
+    totalWind *= windResistance;
 
     // Apply wind - stronger effect at blade tips
     float windInfluence = uv.y * uv.y * uv.y; // Cubic for more dramatic tip movement
@@ -245,12 +263,12 @@ const vertexWebGpuShader = `
     tipColor = mix(tipColor, tipColor * 1.2, colorVar);
 
     // Darker at base, brighter at tip
-    float heightGradient = smoothstep(0.0, 0.8, uv.y);
-    vColor = mix(baseColor * 0.4, tipColor, heightGradient);
+    float heightGradient = smoothstep(0.0, 0.9, uv.y);
+    vColor = mix(baseColor, tipColor, heightGradient);
 
     // Shadow effect from sphere - optimized without conditionals
     float distanceToSphere = length(grassPos.xz - spherePosition.xz);
-    float shadowRadius = 2.0;
+    float shadowRadius = 1.5;
 
     // Use step and clamp instead of conditional
     float inShadowRange = 1.0 - step(shadowRadius, distanceToSphere);
@@ -287,46 +305,25 @@ const fragmentWebGpuShader = `
     vec3 normal = normalize(vNormal);
     float NdotL = max(dot(normal, lightDir), 0.0);
 
-    // Specular calculation - intense highlights on blade tips
-    vec3 viewDir = normalize(cameraPosition - vWorldPosition);
-    vec3 halfwayDir = normalize(lightDir + viewDir);
-    float NdotH = max(dot(normal, halfwayDir), 0.0);
-
-    // Much more intense specular, especially at blade tips
-    float specular = pow(NdotH, 128.0) * 2.0; // Very high shininess and intensity
-
-    // Amplify specular at blade tips
-    float tipMultiplier = smoothstep(0.3, 1.0, vUv.y); // More specular toward tips
-    specular *= (1.0 + tipMultiplier * 3.0); // Up to 4x specular at tips
-
-    // Combine lighting
-    float lighting = 0.4 + 0.6 * NdotL; // Ambient + diffuse
+    // Combine lighting - stronger directional, less ambient
+    float lighting = 0.33 + 0.7 * NdotL; // Reduced ambient + stronger diffuse
 
     // Apply lighting and specular to color
-    vec3 litColor = vColor * lighting + vec3(specular);
+    vec3 litColor = vColor * lighting;
 
-    // Edge antialiasing - softer falloff at blade edges
-    float edgeDistance = abs(vUv.x - 0.5) * 2.0; // 0 at center, 1 at edges
-    float alpha = 1.0 - smoothstep(0.7, 1.0, edgeDistance);
-
-    // Additional antialiasing at blade tip
-    float tipFade = smoothstep(0.5, 1.0, vUv.y);
-    alpha *= (1.0 - tipFade * 0.1);
-
-    // Ensure minimum alpha for visibility
-    alpha = max(alpha, 0.1);
-
-    gl_FragColor = vec4(litColor, alpha);
+    gl_FragColor = vec4(litColor, 1.);
   }
 `;
 
-export default function WebGLGrass({ spherePosition }) {
+export default function WebGLGrass({ spherePosition, windSpeed = 1.0, grassHeight = 1.25 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const oldestTrailPosition = useRef(new THREE.Vector3(0, 1, 0));
 
-  const { "Blade Count": bladeCount, "Field Size": fieldSize } = useControls("🌿 Grass Field", {
+  const { "Blade Count": bladeCount, "Field Size": fieldSize, "Blade Height": bladeHeight, "Wind Speed": windSpeedLeva } = useControls("🌿 Grass Field", {
     "Blade Count": { value: 150000, min: 1000, max: 500000, step: 1000 },
-    "Field Size": { value: 50, min: 10, max: 200, step: 5 }
+    "Blade Height": { value: 1.3, min: 0.7, max: 4.0, step: 0.1 },
+    "Field Size": { value: 50, min: 10, max: 200, step: 5 },
+    "Wind Speed": { value: 1.3, min: 0.0, max: 5.0, step: 0.1 },
   });
 
   const geometry = useMemo(() => {
@@ -349,6 +346,8 @@ export default function WebGLGrass({ spherePosition }) {
       time: { value: 0 },
       fieldSize: { value: fieldSize },
       instanceCount: { value: bladeCount },
+      windSpeed: { value: windSpeedLeva },
+      grassHeight: { value: bladeHeight },
       spherePosition: { value: new THREE.Vector3(0, 1, 0) },
       oldestTrailPosition: { value: new THREE.Vector3(0, 1, 0) },
     }),
@@ -360,15 +359,17 @@ export default function WebGLGrass({ spherePosition }) {
     if (meshRef.current?.material?.uniforms) {
       meshRef.current.material.uniforms.fieldSize.value = fieldSize;
       meshRef.current.material.uniforms.instanceCount.value = bladeCount;
+      meshRef.current.material.uniforms.windSpeed.value = windSpeedLeva;
+      meshRef.current.material.uniforms.grassHeight.value = bladeHeight;
     }
-  }, [fieldSize, bladeCount]);
+  }, [fieldSize, bladeCount, windSpeedLeva, bladeHeight]);
 
   useFrame((state, delta) => {
     if (meshRef.current?.material?.uniforms) {
       meshRef.current.material.uniforms.time.value = state.clock.elapsedTime;
 
       if (spherePosition) {
-        oldestTrailPosition.current.lerp(spherePosition, delta * 0.75);
+        oldestTrailPosition.current.lerp(spherePosition, delta * 0.6);
         meshRef.current.material.uniforms.spherePosition.value.copy(spherePosition);
         meshRef.current.material.uniforms.oldestTrailPosition.value.copy(oldestTrailPosition.current);
       }

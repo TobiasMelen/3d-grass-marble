@@ -9,7 +9,7 @@ const Ground = React.forwardRef(({ fieldSize = 50 }, ref) => {
   return (
     <mesh ref={ref} rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.01, 0]}>
       <planeGeometry args={[fieldSize, fieldSize]} key={fieldSize} />
-      <meshStandardMaterial color="#2d5016" />
+      <meshStandardMaterial color="#232712" />
     </mesh>
   );
 });
@@ -213,9 +213,11 @@ export default function App() {
   });
 
   // Get fieldSize from Grass component's Leva controls
-  const { "Field Size": fieldSize } = useControls("🌿 Grass Field", {
-    "Blade Count": { value: 150000, min: 1000, max: 500000, step: 1000 },
+  const { "Field Size": fieldSize, "Wind Speed": windSpeed, "Blade Height": grassHeight } = useControls("🌿 Grass Field", {
+    "Blade Count": { value: 100_000, min: 1000, max: 500_000, step: 10_000 },
+    "Blade Height": { value: 1.3, min: 0.7, max: 4.0, step: 0.1 },
     "Field Size": { value: 50, min: 10, max: 200, step: 5 },
+    "Wind Speed": { value: 1.0, min: 0.0, max: 2.0, step: 0.1 },
   });
 
 
@@ -236,7 +238,7 @@ export default function App() {
         camera={{ position: [55, 30, 55], fov: 20 }}
         gl={{
           antialias: true,
-          alpha: true,
+          alpha: false,
           powerPreference: "high-performance",
         }}
       >
@@ -246,7 +248,7 @@ export default function App() {
         <pointLight position={[0, 8, 0]} intensity={0.8} color="#ffffff" />
 
         <Ground ref={groundRef} fieldSize={fieldSize} />
-        <WebGLGrass spherePosition={spherePosition} />
+        <WebGLGrass spherePosition={spherePosition} windSpeed={windSpeed} grassHeight={grassHeight} />
         <KineticSphere
           onPositionChange={setSpherePosition}
           groundRef={groundRef}
