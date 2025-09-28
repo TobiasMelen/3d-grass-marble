@@ -145,7 +145,7 @@ const vertexWebGpuShader = `
 
     // Line-based bending - optimized without conditionals
     vec3 sphereInfluence = vec3(0.0);
-    float influenceRadius = 1.75;
+    float influenceRadius = 1.45;
 
     vec2 lineStart = oldestTrailPosition.xz;
     vec2 lineEnd = spherePosition.xz;
@@ -163,11 +163,9 @@ const vertexWebGpuShader = `
     float distanceToLine = length(grassPos.xz - closestPointOnLine);
 
     // Use step functions instead of conditionals
-    float lineValid = step(0.1, lineLength);
     float inRange = 1.0 - step(influenceRadius, distanceToLine);
-    float isActive = lineValid * inRange;
 
-    float bendStrength = (1.0 - (distanceToLine / influenceRadius)) * isActive;
+    float bendStrength = (1.0 - (distanceToLine / influenceRadius));
     bendStrength = smoothstep(0.0, 1.0, bendStrength);
 
     // Position-based falloff
@@ -179,7 +177,7 @@ const vertexWebGpuShader = `
     vec2 toPoint = grassPos.xz - closestPointOnLine;
     float pointDistance = length(toPoint);
     vec2 awayDirection = toPoint / max(pointDistance, 0.001);
-    float bendAmount = bendStrength * uv.y;
+    float bendAmount = bendStrength * 1.3 * uv.y;
 
     sphereInfluence.x = awayDirection.x * bendAmount;
     sphereInfluence.z = awayDirection.y * bendAmount;
@@ -190,23 +188,22 @@ const vertexWebGpuShader = `
 
     rotatedPos += sphereInfluence;
 
-    // LOD-optimized wind: reduce complexity for distant grass
+    // Two-layer wind system: fine detail + powerful gusts
     float windTime = time * windSpeed;
-    vec2 windBaseCoord = grassPos.xz * 0.08 + vec2(windTime * -0.6, windTime * -0.4);
 
-    // Use LOD: close grass gets 2 octaves, far grass gets 1 octave
-    float windNoise = noise(windBaseCoord) * 0.6;
-    windNoise += noise(windBaseCoord * 2.1) * 0.4 * (1.0 - lodFactor); // Skip second octave for distant grass
+    // Fine wind detail - small scale, constant gentle movement
+    vec2 detailCoord = grassPos.xz * 0.1 + vec2(windTime * -0.4, windTime * -0.2);
+    float windDetail = noise(detailCoord) * 0.4;
 
-    // Combine with wind speed and stiffness in one operation
-    float totalWind = windNoise * windSpeed;
+    // Powerful gusts - large scale, strong intermittent waves
+    vec2 gustCoord = grassPos.xz * 0.03 + vec2(windTime * -0.6, windTime * -0.5);
+    float gustBase = noise(gustCoord) * 0.4;
 
-    // Apply stiffness - stiffer blades resist wind more
-    float windResistance = 1.0 / stiffness;
-    totalWind *= windResistance;
+    // Combine layers and apply stiffness
+    float totalWind = (windDetail + gustBase) * windSpeed / stiffness - windSpeed * 0.5;
 
     // Apply wind with combined calculations
-    float windInfluence = uv.y * uv.y * uv.y * totalWind; // Cubic for dramatic tip movement
+    float windInfluence = uv.y * totalWind;
     vec3 windBend = vec3(windInfluence, 0.0, windInfluence * 0.3);
 
     // Combine wind length compensation
@@ -265,7 +262,7 @@ const vertexWebGpuShader = `
 
     // Shadow effect from sphere - optimized without conditionals
     float distanceToSphere = length(grassPos.xz - spherePosition.xz);
-    float shadowRadius = 1.5;
+    float shadowRadius = 1.4;
 
     // Use step and clamp instead of conditional
     float inShadowRange = 1.0 - step(shadowRadius, distanceToSphere);
@@ -324,19 +321,57 @@ export default function WebGLGrass({ spherePosition, windSpeed = 1.0, grassHeigh
   });
 
   const geometry = useMemo(() => {
-    // Reduced geometry: 1x6 segments instead of 1x8 - 25% fewer vertices
-    const geom = new THREE.PlaneGeometry(0.1, 0.6, 1, 6);
-    const positions = geom.attributes.position.array;
-    const uvs = geom.attributes.uv.array;
+    // Create custom geometry with segments concentrated at the tip
+    const width = 0.1;
+    const height = 0.6;
+    const segments = 5; // Total segments
 
-    // Optimize tapering calculation
-    for (let i = 0; i < positions.length; i += 3) {
-      const uv_y = uvs[(i / 3) * 2 + 1];
-      const taper = 1.0 - uv_y * uv_y * 0.9;
-      positions[i] *= taper;
+    // Custom Y distribution - more segments at top, single quad at bottom
+    // Start from bottom and work up to full height
+    const yPositions = [
+      0.0,    // Ground level
+      0.25,   // Bottom-mid (single large segment)
+      0.5,    // Mid
+      0.8,    // Upper-mid
+      0.9,    // Near tip
+      1.0     // Tip
+    ];
+
+    const vertices = [];
+    const uvs = [];
+    const indices = [];
+
+    // Create vertices
+    for (let y = 0; y <= segments; y++) {
+      const v = yPositions[y];
+      const taper = 1.0 - v * v * 0.9; // Apply tapering
+
+      // Left and right vertices
+      vertices.push(-width * 0.5 * taper, v * height, 0); // Left
+      vertices.push(width * 0.5 * taper, v * height, 0);  // Right
+
+      // UVs
+      uvs.push(0, v);
+      uvs.push(1, v);
     }
 
-    geom.translate(0, 0.3, 0);
+    // Create indices for triangles
+    for (let y = 0; y < segments; y++) {
+      const base = y * 2;
+
+      // Two triangles per segment
+      indices.push(base, base + 1, base + 2);
+      indices.push(base + 1, base + 3, base + 2);
+    }
+
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+    geom.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geom.setIndex(indices);
+    geom.computeVertexNormals();
+
+    // Don't translate - let the geometry start at ground level
+    // geom.translate(0, 0.3, 0);
     return geom;
   }, []);
 
@@ -365,8 +400,10 @@ export default function WebGLGrass({ spherePosition, windSpeed = 1.0, grassHeigh
 
   useFrame((state, delta) => {
     if (meshRef.current?.material?.uniforms) {
+      // Always update time for smooth animation
       meshRef.current.material.uniforms.time.value = state.clock.elapsedTime;
 
+      // Update sphere position every frame for responsiveness
       if (spherePosition) {
         oldestTrailPosition.current.lerp(spherePosition, delta * 0.6);
         meshRef.current.material.uniforms.spherePosition.value.copy(spherePosition);
@@ -379,7 +416,7 @@ export default function WebGLGrass({ spherePosition, windSpeed = 1.0, grassHeigh
     <instancedMesh
       ref={meshRef}
       args={[geometry, null, bladeCount]}
-      frustumCulled={false}
+      frustumCulled={false} // Enable frustum culling for better performance
       key={bladeCount} // Force recreation when blade count changes
     >
       <shaderMaterial
