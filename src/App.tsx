@@ -238,6 +238,8 @@ export default function App() {
         camera={{ position: [55, 30, 55], fov: 20 }}
         style={{
           userSelect: "none",
+          WebkitUserSelect: "none",
+          touchAction: "none"
         }}
         gl={{
           antialias: true,
