@@ -248,9 +248,9 @@ export default function App() {
         }}
       >
         <color attach="background" args={["#c2e2ff"]} />
-        <ambientLight intensity={0.2} />
-        <directionalLight position={[10, 10, 5]} intensity={1} />
-        <pointLight position={[0, 8, 0]} intensity={0.8} color="#ffffff" />
+        <ambientLight intensity={0.4} />
+        <directionalLight position={[10, 10, 5]} intensity={1} color="#FFFFCC" />
+        {/* <pointLight position={[0, 8, 0]} intensity={0.8} color="#ffffff" /> */}
 
         <Ground ref={groundRef} fieldSize={fieldSize} />
         <WebGLGrass spherePosition={spherePosition} windSpeed={windSpeed} grassHeight={grassHeight} />
