@@ -155,60 +155,32 @@ const vertexShader = `
 
     rotatedPos += sphereInfluence;
 
-    // Color variation with darker base and random hue shifts
+    // Simplified color variation - single hash for all color properties
     float colorVar = hash11(idx * 0.0031);
-    float hueVar = hash11(idx * 0.0053); // Additional randomness for hue
-    float satVar = hash11(idx * 0.0067); // Saturation variation
 
-    // Base green colors
-    vec3 baseGreen = vec3(0.02, 0.1, 0.02);
-    vec3 tipGreen = vec3(0.2, 0.6, 0.2);
+    // Base warm green with simple variation
+    vec3 baseGreen = vec3(0.15, 0.8, 0.15);
+    vec3 variation = vec3(0.1, 0.3, 0.05); // RGB variation amounts
 
-    // Variations: darker greens, yellower greens, and brighter greens
-    vec3 darkGreen = vec3(0.03, 0.12, 0.03);
-    vec3 yellowGreen = vec3(0.22, 0.28, 0.06);
-    vec3 brightGreen = vec3(0.18, 0.45, 0.18);
-
-    vec3 darkTip = vec3(0.1, 0.35, 0.1);
-    vec3 yellowTip = vec3(0.5, 0.8, 0.15);
-    vec3 brightTip = vec3(0.35, 0.9, 0.35);
-
-    // Mix base colors without conditionals - use step functions
-    float isDark = step(hueVar, 0.3);
-    float isYellow = step(hueVar, 0.7) * (1.0 - isDark);
-    float isBright = 1.0 - step(hueVar, 0.7);
-
-    // Blend colors based on category weights
-    vec3 darkBase = mix(baseGreen, darkGreen, satVar * 1.2);
-    vec3 darkTipCol = mix(tipGreen, darkTip, satVar * 1.2);
-
-    vec3 yellowBase = mix(baseGreen, yellowGreen, satVar);
-    vec3 yellowTipCol = mix(tipGreen, yellowTip, satVar);
-
-    vec3 brightBase = mix(baseGreen, brightGreen, satVar * 1.2);
-    vec3 brightTipCol = mix(tipGreen, brightTip, satVar * 1.2);
-
-    vec3 baseColor = darkBase * isDark + yellowBase * isYellow + brightBase * isBright;
-    vec3 tipColor = darkTipCol * isDark + yellowTipCol * isYellow + brightTipCol * isBright;
-
-    // Final color mixing with original variation
-    baseColor = mix(baseColor, baseColor * 2., colorVar);
-    tipColor = mix(tipColor, tipColor * 2., colorVar);
-
-    // Darker at base, brighter at tip
-    float heightGradient = smoothstep(0.0, 1.0, uv.y);
-    vec3 bladeColor = mix(baseColor, tipColor, heightGradient);
-
-    // Add chartreuse/white shine only at the very tips
-    float tipShine = smoothstep(0.85, 1.0, uv.y);
-    vec3 shineColor = vec3(0.7, 1.0, 0.4); // Bright chartreuse-white
-    vGrassColor = mix(bladeColor, shineColor, tipShine);
+    // Apply variation using single lerp
+    vGrassColor = baseGreen + variation * (colorVar - 0.5) * 2.0;
 
     // Shadow effect from sphere
-    float distanceToSphere = length(grassPos.xz - spherePosition.xz);
-    float shadowRadius = 1.65;
-    float shadowStrength = smoothstep(shadowRadius, 0.0, distanceToSphere) * 0.8;
-    vGrassColor *= (1.0 - shadowStrength);
+    // float distanceToSphere = length(grassPos.xz - spherePosition.xz);
+    // float shadowRadius = 1.65;
+    // float shadowStrength = smoothstep(shadowRadius, 0.0, distanceToSphere) * 0.8;
+    // vGrassColor *= (1.0 - shadowStrength);
+
+    // Calculate lighting modifier with yellow tint at tips - all in vertex
+    float t = uv.y;
+    float linearModifier = t + .1;
+    float tipFactor = (t - 0.66) * 3.0;
+    float tipModifier = 0.8 + tipFactor * tipFactor * 2.5;
+    float lightIntensity = mix(linearModifier, tipModifier, step(0.75, t));
+
+    // Apply yellow tint to bright areas in vertex shader
+    vec3 lightColor = mix(vec3(1.0), vec3(1.0, 0.9, 0.6), smoothstep(1.0, 1.5, lightIntensity));
+    vGrassColor *= lightColor * lightIntensity;
 
     // Calculate rounded normal for cylindrical appearance
     vec3 localNormal = normal;
@@ -227,14 +199,13 @@ const fragmentShader = `
   varying vec3 vGrassColor;
 
   void main() {
+    // Ultra-minimal fragment shader - all calculations done in vertex
     csm_DiffuseColor = vec4(vGrassColor, 1.0);
   }
 `;
 
 export default function WebGLGrass({
   spherePosition,
-  windSpeed = 1.0,
-  grassHeight = 1.25,
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const oldestTrailPosition = useRef(new THREE.Vector3(0, 1, 0));
@@ -354,11 +325,7 @@ export default function WebGLGrass({
       key={bladeCount}
     >
       <CustomShaderMaterial
-        baseMaterial={THREE.MeshPhysicalMaterial}
-        // sheen={1}
-        metalness={0.2}
-        roughness={0.8}
-        clearcoat={0.2}
+        baseMaterial={THREE.MeshLambertMaterial}
         vertexShader={vertexShader}
         fragmentShader={fragmentShader}
         uniforms={uniforms}
