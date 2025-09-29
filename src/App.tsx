@@ -214,7 +214,7 @@ export default function App() {
 
   // Get fieldSize from Grass component's Leva controls
   const { "Field Size": fieldSize, "Wind Speed": windSpeed, "Blade Height": grassHeight } = useControls("🌿 Grass Field", {
-    "Blade Count": { value: 100_000, min: 1000, max: 500_000, step: 10_000 },
+    "Blade Count": { value: 80_000, min: 1000, max: 500_000, step: 10_000 },
     "Blade Height": { value: 1.3, min: 0.7, max: 4.0, step: 0.1 },
     "Field Size": { value: 50, min: 10, max: 200, step: 5 },
     "Wind Speed": { value: 1.0, min: 0.0, max: 2.0, step: 0.1 },
@@ -248,9 +248,9 @@ export default function App() {
         }}
       >
         <color attach="background" args={["#c2e2ff"]} />
-        <ambientLight intensity={0.2} />
-        <directionalLight position={[10, 10, 5]} intensity={1} />
-        <pointLight position={[0, 8, 0]} intensity={0.8} color="#ffffff" />
+        <ambientLight intensity={0.4} />
+        <directionalLight position={[10, 10, 5]} intensity={1} color="#FFFFCC" />
+        {/* <pointLight position={[0, 8, 0]} intensity={0.8} color="#ffffff" /> */}
 
         <Ground ref={groundRef} fieldSize={fieldSize} />
         <WebGLGrass spherePosition={spherePosition} windSpeed={windSpeed} grassHeight={grassHeight} />

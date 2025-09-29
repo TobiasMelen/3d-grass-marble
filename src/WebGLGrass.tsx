@@ -1,22 +1,19 @@
 import { useFrame } from "@react-three/fiber";
 import { useControls } from "leva";
 import { useRef, useMemo, useEffect } from "react";
-import * as THREE from 'three'
+import * as THREE from "three";
+import CustomShaderMaterial from "three-custom-shader-material";
 
-const vertexWebGpuShader = `
+const vertexShader = `
   uniform float time;
   uniform float fieldSize;
-  uniform float instanceCount;
   uniform float windSpeed;
   uniform float grassHeight;
   uniform vec3 spherePosition;
   uniform vec3 oldestTrailPosition;
-  varying vec2 vUv;
-  varying vec3 vColor;
-  varying vec3 vNormal;
-  varying vec3 vWorldPosition;
+  varying vec3 vGrassColor;
 
-  // Improved hash functions for pseudo-random numbers
+  // Hash functions for pseudo-random numbers
   float hash11(float p) {
     p = fract(p * 0.1031);
     p *= p + 33.33;
@@ -36,104 +33,61 @@ const vertexWebGpuShader = `
     return fract((p3.xx + p3.yz) * p3.zy);
   }
 
-  // Simple noise function for wind
+  // Simple noise function
   float noise(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
-
     float a = hash12(i);
     float b = hash12(i + vec2(1.0, 0.0));
     float c = hash12(i + vec2(0.0, 1.0));
     float d = hash12(i + vec2(1.0, 1.0));
-
     vec2 u = f * f * (3.0 - 2.0 * f);
-
     return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
   }
 
-  // Function to calculate bending from any position
-  vec3 calculateBending(vec3 fromPosition, float strength, vec2 grassPos, float influenceRadius, float uvY) {
-    float distance = length(grassPos - fromPosition.xz);
-    if (distance < influenceRadius) {
-      float bendStrength = 1.0 - (distance / influenceRadius);
-      bendStrength = smoothstep(0.0, 1.0, bendStrength);
-
-      vec2 awayDirection = normalize(grassPos - fromPosition.xz);
-      float bendAmount = bendStrength * uvY * strength;
-
-      return vec3(awayDirection.x * bendAmount, 0.0, awayDirection.y * bendAmount);
-    }
-    return vec3(0.0);
-  }
-
   void main() {
-    vUv = uv;
-
-    // Get instance ID
+    // Get instance ID and generate grass position
     float idx = float(gl_InstanceID);
-
-    // Generate position within fixed field size using improved hash
-    // Use multiple seeds to avoid correlation between x and z coordinates
     vec2 randPos = hash22(vec2(idx * 0.0013, idx * 0.0017));
     float x = (randPos.x - 0.5) * fieldSize;
     float z = (randPos.y - 0.5) * fieldSize;
-
     vec3 grassPos = vec3(x, 0.0, z);
 
-    // Distance-based LOD: reduce detail for far grass
-    float distanceToCamera = length(cameraPosition - grassPos);
-    float lodFactor = smoothstep(20.0, 60.0, distanceToCamera); // Start reducing at 20m, full reduction at 60m
-
-    // Better distributed random values - keep quality but optimize
+    // Random variations
     vec2 sizeVars = hash22(vec2(idx * 0.0019, idx * 0.0023));
     float heightVar = grassHeight + sizeVars.x * 0.8;
     float widthVar = 0.7 + sizeVars.y * 0.6;
+    float stiffness = 0.5 + hash11(idx * 0.0071) * 0.8;
+    float randomRotation = hash11(idx * 0.0037) * 6.28318;
 
-    // Separate random values for different properties to avoid correlation
-    float stiffnessVar = hash11(idx * 0.0071);
-    float stiffness = 0.5 + stiffnessVar * 0.8; // Range: 0.5 to 1.3
-
-    // Random rotation with better distribution
-    float randomRotation = hash11(idx * 0.0037) * 6.28318; // 0 to 2π
-
-    // Random initial bend with independent values
+    // Random initial bend - gives blades natural resting position
     vec2 bendVars = hash22(vec2(idx * 0.0041, idx * 0.0047));
     float bendAngle = bendVars.x * 6.28318; // Random direction 0 to 2π
     float bendMagnitude = bendVars.y * 0.25; // Random strength
     float baseBendX = cos(bendAngle) * bendMagnitude;
     float baseBendZ = sin(bendAngle) * bendMagnitude;
 
-    // Simplified billboard effect using dot product
+    // Billboard effect
     vec2 toCameraXZ = normalize(cameraPosition.xz - grassPos.xz);
-
-    // Current blade direction from rotation
     vec2 bladeDir = vec2(cos(randomRotation), sin(randomRotation));
-
-    // How aligned is blade with camera direction (0 = perpendicular, 1 = aligned)
     float alignment = abs(dot(bladeDir, toCameraXZ));
-
-    // Billboard strength when blade is edge-on (highly aligned)
     float billboardStrength = smoothstep(0.3, 0.9, alignment) * 0.7;
-
-    // Optimal angle perpendicular to camera
     float optimalAngle = atan(toCameraXZ.y, toCameraXZ.x) + 1.5708;
     float finalRotation = mix(randomRotation, optimalAngle, billboardStrength);
 
-    // Apply rotation to blade
-    float cosRot = cos(finalRotation);
-    float sinRot = sin(finalRotation);
-
-    // Scale the blade
+    // Transform position
     vec3 scaledPos = position;
     scaledPos.xz *= widthVar;
     scaledPos.y *= heightVar;
 
-    // Rotate around Y axis
+    // Rotate
+    float cosRot = cos(finalRotation);
+    float sinRot = sin(finalRotation);
     vec3 rotatedPos = scaledPos;
     rotatedPos.x = scaledPos.x * cosRot - scaledPos.z * sinRot;
     rotatedPos.z = scaledPos.x * sinRot + scaledPos.z * cosRot;
 
-    // Apply initial bend with combined calculations
+    // Apply initial bend with natural curve
     float bendInfluence = uv.y * uv.y * heightVar; // Quadratic curve for natural bend
     vec3 initialBend = vec3(baseBendX * bendInfluence, 0.0, baseBendZ * bendInfluence);
 
@@ -143,7 +97,20 @@ const vertexWebGpuShader = `
 
     rotatedPos += initialBend;
 
-    // Line-based bending - optimized without conditionals
+    // Wind system
+    float windTime = time * windSpeed;
+    vec2 detailCoord = grassPos.xz * 0.1 + vec2(windTime * -0.4, windTime * -0.2);
+    float windDetail = noise(detailCoord) * 0.4;
+    vec2 gustCoord = grassPos.xz * 0.03 + vec2(windTime * -0.6, windTime * -0.5);
+    float gustBase = noise(gustCoord) * 0.4;
+    float totalWind = (windDetail + gustBase) * windSpeed / stiffness - windSpeed * 0.5;
+
+    // Apply wind
+    float windInfluence = uv.y * totalWind;
+    vec3 windBend = vec3(windInfluence, -windInfluence * windInfluence * 0.1 * uv.y, windInfluence * 0.3);
+    rotatedPos += windBend;
+
+    // Line-based bending for sphere trail
     vec3 sphereInfluence = vec3(0.0);
     float influenceRadius = 1.45;
 
@@ -168,7 +135,7 @@ const vertexWebGpuShader = `
     float bendStrength = (1.0 - (distanceToLine / influenceRadius));
     bendStrength = smoothstep(0.0, 1.0, bendStrength);
 
-    // Position-based falloff
+    // Position-based falloff along the trail
     float positionAlongLine = projectionLength / safeLineLength;
     float lineFalloff = smoothstep(0.0, 1.0, positionAlongLine);
     bendStrength *= lineFalloff;
@@ -188,90 +155,32 @@ const vertexWebGpuShader = `
 
     rotatedPos += sphereInfluence;
 
-    // Two-layer wind system: fine detail + powerful gusts
-    float windTime = time * windSpeed;
-
-    // Fine wind detail - small scale, constant gentle movement
-    vec2 detailCoord = grassPos.xz * 0.1 + vec2(windTime * -0.4, windTime * -0.2);
-    float windDetail = noise(detailCoord) * 0.4;
-
-    // Powerful gusts - large scale, strong intermittent waves
-    vec2 gustCoord = grassPos.xz * 0.03 + vec2(windTime * -0.6, windTime * -0.5);
-    float gustBase = noise(gustCoord) * 0.4;
-
-    // Combine layers and apply stiffness
-    float totalWind = (windDetail + gustBase) * windSpeed / stiffness - windSpeed * 0.5;
-
-    // Apply wind with combined calculations
-    float windInfluence = uv.y * totalWind;
-    vec3 windBend = vec3(windInfluence, 0.0, windInfluence * 0.3);
-
-    // Combine wind length compensation
-    float windLengthSq = dot(windBend.xz, windBend.xz);
-    windBend.y = -windLengthSq * 0.1 * uv.y;
-
-    rotatedPos += windBend;
-
-    // Final position
-    vec3 finalPos = rotatedPos + grassPos;
-    vWorldPosition = finalPos;
-
-    // Independent color variations for proper randomization
+    // Simplified color variation - single hash for all color properties
     float colorVar = hash11(idx * 0.0031);
-    float hueVar = hash11(idx * 0.0053); // Additional randomness for hue
-    float satVar = hash11(idx * 0.0067); // Saturation variation
 
-    // Base green colors
-    vec3 baseGreen = vec3(0.08, 0.25, 0.08);
-    vec3 tipGreen = vec3(0.2, 0.6, 0.2);
+    // Base warm green with simple variation
+    vec3 baseGreen = vec3(0.15, 0.8, 0.15);
+    vec3 variation = vec3(0.1, 0.3, 0.05); // RGB variation amounts
 
-    // Variations: darker greens, yellower greens, and brighter greens - more prominent
-    vec3 darkGreen = vec3(0.03, 0.12, 0.03);
-    vec3 yellowGreen = vec3(0.22, 0.28, 0.06);
-    vec3 brightGreen = vec3(0.18, 0.45, 0.18);
+    // Apply variation using single lerp
+    vGrassColor = baseGreen + variation * (colorVar - 0.5) * 2.0;
 
-    vec3 darkTip = vec3(0.1, 0.35, 0.1);
-    vec3 yellowTip = vec3(0.5, 0.8, 0.15);
-    vec3 brightTip = vec3(0.35, 0.9, 0.35);
+    // Shadow effect from sphere
+    // float distanceToSphere = length(grassPos.xz - spherePosition.xz);
+    // float shadowRadius = 1.65;
+    // float shadowStrength = smoothstep(shadowRadius, 0.0, distanceToSphere) * 0.8;
+    // vGrassColor *= (1.0 - shadowStrength);
 
-    // Mix base colors without conditionals - use step functions
-    float isDark = step(hueVar, 0.3);
-    float isYellow = step(hueVar, 0.7) * (1.0 - isDark);
-    float isBright = 1.0 - step(hueVar, 0.7);
+    // Calculate lighting modifier with yellow tint at tips - all in vertex
+    float t = uv.y;
+    float linearModifier = t + .1;
+    float tipFactor = (t - 0.66) * 3.0;
+    float tipModifier = 0.8 + tipFactor * tipFactor * 2.5;
+    float lightIntensity = mix(linearModifier, tipModifier, step(0.75, t));
 
-    // Blend colors based on category weights
-    vec3 darkBase = mix(baseGreen, darkGreen, satVar * 1.2);
-    vec3 darkTipCol = mix(tipGreen, darkTip, satVar * 1.2);
-
-    vec3 yellowBase = mix(baseGreen, yellowGreen, satVar);
-    vec3 yellowTipCol = mix(tipGreen, yellowTip, satVar);
-
-    vec3 brightBase = mix(baseGreen, brightGreen, satVar * 1.2);
-    vec3 brightTipCol = mix(tipGreen, brightTip, satVar * 1.2);
-
-    vec3 baseColor = darkBase * isDark + yellowBase * isYellow + brightBase * isBright;
-    vec3 tipColor = darkTipCol * isDark + yellowTipCol * isYellow + brightTipCol * isBright;
-
-    // Final color mixing with original variation
-    baseColor = mix(baseColor, baseColor * 1.6, colorVar);
-    tipColor = mix(tipColor, tipColor * 1.6, colorVar);
-
-    // Darker at base, brighter at tip
-    float heightGradient = smoothstep(0., 1., uv.y);
-    vColor = mix(baseColor, tipColor, heightGradient);
-
-    // Shadow effect from sphere - optimized without conditionals
-    float distanceToSphere = length(grassPos.xz - spherePosition.xz);
-    float shadowRadius = 1.65;
-
-    // Use step and clamp instead of conditional
-    float inShadowRange = 1.0 - step(shadowRadius, distanceToSphere);
-    float shadowStrength = clamp(1.0 - (distanceToSphere / shadowRadius), 0.0, 1.0) * inShadowRange;
-    shadowStrength = smoothstep(0.0, 1.0, shadowStrength);
-
-    // Apply shadow unconditionally
-    float darkenAmount = shadowStrength * 0.8;
-    vColor *= (1.0 - darkenAmount);
+    // Apply yellow tint to bright areas in vertex shader
+    vec3 lightColor = mix(vec3(1.0), vec3(1.0, 0.9, 0.6), smoothstep(1.0, 1.5, lightIntensity));
+    vGrassColor *= lightColor * lightIntensity;
 
     // Calculate rounded normal for cylindrical appearance
     vec3 localNormal = normal;
@@ -280,40 +189,33 @@ const vertexWebGpuShader = `
     localNormal.x = roundness * 0.75; // Curve the normal
     localNormal = normalize(localNormal);
 
-    // Transform normal to world space (simplified)
-    vNormal = normalize(localNormal);
-
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(finalPos, 1.0);
+    // Update position and normal for CSM
+    csm_Position = rotatedPos + grassPos;
+    csm_Normal = localNormal;
   }
 `;
 
-const fragmentWebGpuShader = `
-  varying vec2 vUv;
-  varying vec3 vColor;
-  varying vec3 vNormal;
-  varying vec3 vWorldPosition;
+const fragmentShader = `
+  varying vec3 vGrassColor;
 
   void main() {
-    // Basic lighting calculation
-    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
-    vec3 normal = normalize(vNormal);
-    float NdotL = max(dot(normal, lightDir), 0.0);
-
-    // Combine lighting - stronger directional, less ambient
-    float lighting = 0.33 + 0.7 * NdotL; // Reduced ambient + stronger diffuse
-
-    // Apply lighting and specular to color
-    vec3 litColor = vColor * lighting;
-
-    gl_FragColor = vec4(litColor, 1.);
+    // Ultra-minimal fragment shader - all calculations done in vertex
+    csm_DiffuseColor = vec4(vGrassColor, 1.0);
   }
 `;
 
-export default function WebGLGrass({ spherePosition, windSpeed = 1.0, grassHeight = 1.25 }) {
+export default function WebGLGrass({
+  spherePosition,
+}) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const oldestTrailPosition = useRef(new THREE.Vector3(0, 1, 0));
 
-  const { "Blade Count": bladeCount, "Field Size": fieldSize, "Blade Height": bladeHeight, "Wind Speed": windSpeedLeva } = useControls("🌿 Grass Field", {
+  const {
+    "Blade Count": bladeCount,
+    "Field Size": fieldSize,
+    "Blade Height": bladeHeight,
+    "Wind Speed": windSpeedLeva,
+  } = useControls("🌿 Grass Field", {
     "Blade Count": { value: 150000, min: 1000, max: 500000, step: 1000 },
     "Blade Height": { value: 1.3, min: 0.7, max: 4.0, step: 0.1 },
     "Field Size": { value: 50, min: 10, max: 200, step: 5 },
@@ -329,12 +231,12 @@ export default function WebGLGrass({ spherePosition, windSpeed = 1.0, grassHeigh
     // Custom Y distribution - more segments at top, single quad at bottom
     // Start from bottom and work up to full height
     const yPositions = [
-      0.0,    // Ground level
-      0.25,   // Bottom-mid (single large segment)
-      0.5,    // Mid
-      0.8,    // Upper-mid
-      0.9,    // Near tip
-      1.0     // Tip
+      0.0, // Ground level
+      0.25, // Bottom-mid (single large segment)
+      0.5, // Mid
+      0.8, // Upper-mid
+      0.9, // Near tip
+      1.0, // Tip
     ];
 
     const vertices = [];
@@ -348,7 +250,7 @@ export default function WebGLGrass({ spherePosition, windSpeed = 1.0, grassHeigh
 
       // Left and right vertices
       vertices.push(-width * 0.5 * taper, v * height, 0); // Left
-      vertices.push(width * 0.5 * taper, v * height, 0);  // Right
+      vertices.push(width * 0.5 * taper, v * height, 0); // Right
 
       // UVs
       uvs.push(0, v);
@@ -365,13 +267,14 @@ export default function WebGLGrass({ spherePosition, windSpeed = 1.0, grassHeigh
     }
 
     const geom = new THREE.BufferGeometry();
-    geom.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-    geom.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geom.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(vertices, 3)
+    );
+    geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
     geom.setIndex(indices);
     geom.computeVertexNormals();
 
-    // Don't translate - let the geometry start at ground level
-    // geom.translate(0, 0.3, 0);
     return geom;
   }, []);
 
@@ -379,7 +282,6 @@ export default function WebGLGrass({ spherePosition, windSpeed = 1.0, grassHeigh
     () => ({
       time: { value: 0 },
       fieldSize: { value: fieldSize },
-      instanceCount: { value: bladeCount },
       windSpeed: { value: windSpeedLeva },
       grassHeight: { value: bladeHeight },
       spherePosition: { value: new THREE.Vector3(0, 1, 0) },
@@ -392,22 +294,25 @@ export default function WebGLGrass({ spherePosition, windSpeed = 1.0, grassHeigh
   useEffect(() => {
     if (meshRef.current?.material?.uniforms) {
       meshRef.current.material.uniforms.fieldSize.value = fieldSize;
-      meshRef.current.material.uniforms.instanceCount.value = bladeCount;
       meshRef.current.material.uniforms.windSpeed.value = windSpeedLeva;
       meshRef.current.material.uniforms.grassHeight.value = bladeHeight;
     }
-  }, [fieldSize, bladeCount, windSpeedLeva, bladeHeight]);
+  }, [fieldSize, windSpeedLeva, bladeHeight]);
 
   useFrame((state, delta) => {
     if (meshRef.current?.material?.uniforms) {
       // Always update time for smooth animation
       meshRef.current.material.uniforms.time.value = state.clock.elapsedTime;
 
-      // Update sphere position every frame for responsiveness
+      // Update sphere position and trail every frame for responsiveness
       if (spherePosition) {
         oldestTrailPosition.current.lerp(spherePosition, delta * 0.6);
-        meshRef.current.material.uniforms.spherePosition.value.copy(spherePosition);
-        meshRef.current.material.uniforms.oldestTrailPosition.value.copy(oldestTrailPosition.current);
+        meshRef.current.material.uniforms.spherePosition.value.copy(
+          spherePosition
+        );
+        meshRef.current.material.uniforms.oldestTrailPosition.value.copy(
+          oldestTrailPosition.current
+        );
       }
     }
   });
@@ -416,12 +321,13 @@ export default function WebGLGrass({ spherePosition, windSpeed = 1.0, grassHeigh
     <instancedMesh
       ref={meshRef}
       args={[geometry, null, bladeCount]}
-      frustumCulled={false} // Enable frustum culling for better performance
-      key={bladeCount} // Force recreation when blade count changes
+      frustumCulled={false}
+      key={bladeCount}
     >
-      <shaderMaterial
-        vertexShader={vertexWebGpuShader}
-        fragmentShader={fragmentWebGpuShader}
+      <CustomShaderMaterial
+        baseMaterial={THREE.MeshLambertMaterial}
+        vertexShader={vertexShader}
+        fragmentShader={fragmentShader}
         uniforms={uniforms}
         side={THREE.DoubleSide}
         transparent
