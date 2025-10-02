@@ -204,9 +204,7 @@ const fragmentShader = `
   }
 `;
 
-export default function WebGLGrass({
-  spherePosition,
-}) {
+export default function WebGLGrass({ spherePosition }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const oldestTrailPosition = useRef(new THREE.Vector3(0, 1, 0));
 
@@ -223,48 +221,47 @@ export default function WebGLGrass({
   });
 
   const geometry = useMemo(() => {
-    // Create custom geometry with segments concentrated at the tip
     const width = 0.1;
     const height = 0.6;
-    const segments = 5; // Total segments
 
-    // Custom Y distribution - more segments at top, single quad at bottom
-    // Start from bottom and work up to full height
-    const yPositions = [
-      0.0, // Ground level
-      0.25, // Bottom-mid (single large segment)
-      0.5, // Mid
-      0.8, // Upper-mid
-      0.9, // Near tip
-      1.0, // Tip
-    ];
+    const yPositions = [0.0, 0.5, 0.8, 1.0];
 
     const vertices = [];
     const uvs = [];
     const indices = [];
 
-    // Create vertices
-    for (let y = 0; y <= segments; y++) {
+    // Create vertices - all levels except tip have 2 vertices
+    for (let y = 0; y < yPositions.length - 1; y++) {
       const v = yPositions[y];
-      const taper = 1.0 - v * v * 0.9; // Apply tapering
+      const taper = 1.0 - v * v * 0.9;
 
-      // Left and right vertices
-      vertices.push(-width * 0.5 * taper, v * height, 0); // Left
-      vertices.push(width * 0.5 * taper, v * height, 0); // Right
+      vertices.push(-width * 0.5 * taper, v * height, 0);
+      vertices.push(width * 0.5 * taper, v * height, 0);
 
-      // UVs
       uvs.push(0, v);
       uvs.push(1, v);
     }
 
-    // Create indices for triangles
-    for (let y = 0; y < segments; y++) {
-      const base = y * 2;
+    // Add single tip vertex
+    const tipV = yPositions[yPositions.length - 1];
+    vertices.push(0, tipV * height, 0); // Single vertex at center
+    uvs.push(0.5, tipV); // UV at center
 
-      // Two triangles per segment
+    // Create indices - quads for body, triangles for tip
+    for (let y = 0; y < yPositions.length - 2; y++) {
+      const base = y * 2;
+      // Two triangles forming a quad
       indices.push(base, base + 1, base + 2);
       indices.push(base + 1, base + 3, base + 2);
     }
+
+    // Create tip triangles (connect last quad to single tip vertex)
+    const lastQuadBase = (yPositions.length - 2) * 2;
+    const tipVertexIndex = lastQuadBase + 2;
+
+    // Two triangles from last quad edges to tip
+    indices.push(lastQuadBase, lastQuadBase + 1, tipVertexIndex);
+    indices.push(lastQuadBase + 1, lastQuadBase, tipVertexIndex);
 
     const geom = new THREE.BufferGeometry();
     geom.setAttribute(
