@@ -166,10 +166,10 @@ const vertexShader = `
     vGrassColor = baseGreen + variation * (colorVar - 0.5) * 2.0;
 
     // Shadow effect from sphere
-    // float distanceToSphere = length(grassPos.xz - spherePosition.xz);
-    // float shadowRadius = 1.65;
-    // float shadowStrength = smoothstep(shadowRadius, 0.0, distanceToSphere) * 0.8;
-    // vGrassColor *= (1.0 - shadowStrength);
+    float distanceToSphere = length(grassPos.xz - spherePosition.xz);
+    float shadowRadius = 2.;
+    float shadowStrength = smoothstep(shadowRadius, 0.0, distanceToSphere) * 0.8;
+    vGrassColor *= (1.0 - shadowStrength);
 
     // Calculate lighting modifier with yellow tint at tips - all in vertex
     float t = uv.y;
