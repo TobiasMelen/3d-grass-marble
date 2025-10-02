@@ -14,7 +14,7 @@ const Ground = React.forwardRef(({ fieldSize = 50 }, ref) => {
   );
 });
 
-function KineticSphere({ onPositionChange, groundRef }) {
+function KineticSphere({ onPositionChange, groundRef, grassHeight }) {
   const meshRef = useRef<THREE.Mesh>(null);
   const velocity = useRef(new THREE.Vector3());
   const keys = useRef({ w: false, a: false, s: false, d: false });
@@ -157,7 +157,47 @@ function KineticSphere({ onPositionChange, groundRef }) {
   return (
     <mesh ref={meshRef} position={[0, 1.0, 0]}>
       <sphereGeometry args={[1.0, 32, 32]} />
-      <meshStandardMaterial roughness={0.3} metalness={0.1} color="#F44" />
+      <meshStandardMaterial
+        roughness={0.3}
+        metalness={0.1}
+        color="#F44"
+        onBeforeCompile={(shader) => {
+          shader.uniforms.grassHeight = { value: grassHeight };
+          shader.vertexShader = shader.vertexShader.replace(
+            '#include <common>',
+            `
+            #include <common>
+            varying vec3 vWorldNormal;
+            `
+          );
+          shader.vertexShader = shader.vertexShader.replace(
+            '#include <worldpos_vertex>',
+            `
+            #include <worldpos_vertex>
+            vWorldNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+            `
+          );
+          shader.fragmentShader = shader.fragmentShader.replace(
+            '#include <common>',
+            `
+            #include <common>
+            uniform float grassHeight;
+            varying vec3 vWorldNormal;
+            `
+          );
+          shader.fragmentShader = shader.fragmentShader.replace(
+            '#include <dithering_fragment>',
+            `
+            #include <dithering_fragment>
+
+            // Fake ambient occlusion - darkening starts higher with taller grass
+            float bottomFactor = smoothstep(-0.5, 0.2, vWorldNormal.y);
+            gl_FragColor.rgb *= mix(0.3, 1., bottomFactor);
+            `
+          );
+          shader.customProgramCacheKey = grassHeight.toString();
+        }}
+      />
     </mesh>
   );
 }
@@ -257,6 +297,7 @@ export default function App() {
         <KineticSphere
           onPositionChange={setSpherePosition}
           groundRef={groundRef}
+          grassHeight={grassHeight}
         />
 
         <CameraController

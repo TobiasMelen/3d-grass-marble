@@ -52,6 +52,10 @@ const vertexShader = `
     float x = (randPos.x - 0.5) * fieldSize;
     float z = (randPos.y - 0.5) * fieldSize;
     vec3 grassPos = vec3(x, 0.0, z);
+    vec2 grassPosXZ = grassPos.xz; // Store for reuse
+
+    // Store uv.y for reuse
+    float uvY = uv.y;
 
     // Random variations
     vec2 sizeVars = hash22(vec2(idx * 0.0019, idx * 0.0023));
@@ -60,6 +64,10 @@ const vertexShader = `
     float stiffness = 0.5 + hash11(idx * 0.0071) * 0.8;
     float randomRotation = hash11(idx * 0.0037) * 6.28318;
 
+    // Calculate sin/cos once for reuse
+    float cosRot = cos(randomRotation);
+    float sinRot = sin(randomRotation);
+
     // Random initial bend - gives blades natural resting position
     vec2 bendVars = hash22(vec2(idx * 0.0041, idx * 0.0047));
     float bendAngle = bendVars.x * 6.28318; // Random direction 0 to 2π
@@ -67,47 +75,46 @@ const vertexShader = `
     float baseBendX = cos(bendAngle) * bendMagnitude;
     float baseBendZ = sin(bendAngle) * bendMagnitude;
 
-    // Billboard effect
-    vec2 toCameraXZ = normalize(cameraPosition.xz - grassPos.xz);
-    vec2 bladeDir = vec2(cos(randomRotation), sin(randomRotation));
-    float alignment = abs(dot(bladeDir, toCameraXZ));
-    float billboardStrength = smoothstep(0.3, 0.9, alignment) * 0.7;
-    float optimalAngle = atan(toCameraXZ.y, toCameraXZ.x) + 1.5708;
-    float finalRotation = mix(randomRotation, optimalAngle, billboardStrength);
+    // View-space thickening - calculate BEFORE rotation
+    vec2 viewDirXZ = normalize(cameraPosition.xz - grassPosXZ);
+    // The blade faces perpendicular to its rotation (reuse sin/cos)
+    vec2 grassFaceNormal = vec2(-sinRot, cosRot);
+    float viewDotNormal = clamp(abs(dot(grassFaceNormal, viewDirXZ)), 0.0, 1.0);
+    float viewSpaceThickenFactor = pow(1.0 - viewDotNormal, 2.0);
 
     // Transform position
     vec3 scaledPos = position;
     scaledPos.xz *= widthVar;
+    scaledPos.xz += position.xz * viewSpaceThickenFactor * 4.0;
     scaledPos.y *= heightVar;
 
-    // Rotate
-    float cosRot = cos(finalRotation);
-    float sinRot = sin(finalRotation);
+    // Rotate (reuse sin/cos)
     vec3 rotatedPos = scaledPos;
     rotatedPos.x = scaledPos.x * cosRot - scaledPos.z * sinRot;
     rotatedPos.z = scaledPos.x * sinRot + scaledPos.z * cosRot;
 
     // Apply initial bend with natural curve
-    float bendInfluence = uv.y * uv.y * heightVar; // Quadratic curve for natural bend
+    float uvYSq = uvY * uvY;
+    float bendInfluence = uvYSq * heightVar; // Quadratic curve for natural bend
     vec3 initialBend = vec3(baseBendX * bendInfluence, 0.0, baseBendZ * bendInfluence);
 
     // Combine length compensation in one operation
     float bendLengthSq = dot(initialBend.xz, initialBend.xz);
-    initialBend.y = -bendLengthSq * 0.2 * uv.y;
+    initialBend.y = -bendLengthSq * 0.2 * uvY;
 
     rotatedPos += initialBend;
 
     // Wind system
     float windTime = time * windSpeed;
-    vec2 detailCoord = grassPos.xz * 0.1 + vec2(windTime * -0.4, windTime * -0.2);
+    vec2 detailCoord = grassPosXZ * 0.1 + vec2(windTime * -0.4, windTime * -0.2);
     float windDetail = noise(detailCoord) * 0.4;
-    vec2 gustCoord = grassPos.xz * 0.03 + vec2(windTime * -0.6, windTime * -0.5);
+    vec2 gustCoord = grassPosXZ * 0.03 + vec2(windTime * -0.6, windTime * -0.5);
     float gustBase = noise(gustCoord) * 0.4;
     float totalWind = (windDetail + gustBase) * windSpeed / stiffness - windSpeed * 0.5;
 
     // Apply wind
-    float windInfluence = uv.y * totalWind;
-    vec3 windBend = vec3(windInfluence, -windInfluence * windInfluence * 0.1 * uv.y, windInfluence * 0.3);
+    float windInfluence = uvY * totalWind;
+    vec3 windBend = vec3(windInfluence, -windInfluence * windInfluence * 0.1 * uvY, windInfluence * 0.3);
     rotatedPos += windBend;
 
     // Line-based bending for sphere trail
@@ -124,13 +131,10 @@ const vertexShader = `
     vec2 lineDirection = lineVector / safeLineLength;
 
     // Find closest point on line to grass position
-    vec2 toGrass = grassPos.xz - lineStart;
+    vec2 toGrass = grassPosXZ - lineStart;
     float projectionLength = clamp(dot(toGrass, lineDirection), 0.0, safeLineLength);
     vec2 closestPointOnLine = lineStart + lineDirection * projectionLength;
-    float distanceToLine = length(grassPos.xz - closestPointOnLine);
-
-    // Use step functions instead of conditionals
-    float inRange = 1.0 - step(influenceRadius, distanceToLine);
+    float distanceToLine = length(grassPosXZ - closestPointOnLine);
 
     float bendStrength = (1.0 - (distanceToLine / influenceRadius));
     bendStrength = smoothstep(0.0, 1.0, bendStrength);
@@ -141,17 +145,16 @@ const vertexShader = `
     bendStrength *= lineFalloff;
 
     // Bend calculation
-    vec2 toPoint = grassPos.xz - closestPointOnLine;
+    vec2 toPoint = grassPosXZ - closestPointOnLine;
     float pointDistance = length(toPoint);
     vec2 awayDirection = toPoint / max(pointDistance, 0.001);
-    float bendAmount = bendStrength * 1.3 * uv.y;
+    float bendAmount = bendStrength * 1.3 * uvY;
 
     sphereInfluence.x = awayDirection.x * bendAmount;
     sphereInfluence.z = awayDirection.y * bendAmount;
 
-    // Height compensation for bending
-    float horizontalBend = length(sphereInfluence.xz);
-    sphereInfluence.y = -horizontalBend * horizontalBend * 0.3 * uv.y;
+    // Height compensation for bending (optimized: awayDirection is normalized)
+    sphereInfluence.y = -bendAmount * bendAmount * 0.3 * uvY;
 
     rotatedPos += sphereInfluence;
 
@@ -166,17 +169,16 @@ const vertexShader = `
     vGrassColor = baseGreen + variation * (colorVar - 0.5) * 2.0;
 
     // Shadow effect from sphere
-    float distanceToSphere = length(grassPos.xz - spherePosition.xz);
+    float distanceToSphere = length(grassPosXZ - spherePosition.xz);
     float shadowRadius = 2.;
     float shadowStrength = smoothstep(shadowRadius, 0.0, distanceToSphere) * 0.8;
     vGrassColor *= (1.0 - shadowStrength);
 
     // Calculate lighting modifier with yellow tint at tips - all in vertex
-    float t = uv.y;
-    float linearModifier = t + .1;
-    float tipFactor = (t - 0.66) * 3.0;
+    float linearModifier = uvY + .1;
+    float tipFactor = (uvY - 0.66) * 3.0;
     float tipModifier = 0.8 + tipFactor * tipFactor * 2.5;
-    float lightIntensity = mix(linearModifier, tipModifier, step(0.75, t));
+    float lightIntensity = mix(linearModifier, tipModifier, step(0.75, uvY));
 
     // Apply yellow tint to bright areas in vertex shader
     vec3 lightColor = mix(vec3(1.0), vec3(1.0, 0.9, 0.6), smoothstep(1.0, 1.5, lightIntensity));
@@ -204,7 +206,9 @@ const fragmentShader = `
   }
 `;
 
-export default function WebGLGrass({ spherePosition }) {
+export default function WebGLGrass({
+  spherePosition,
+}) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const oldestTrailPosition = useRef(new THREE.Vector3(0, 1, 0));
 
@@ -220,60 +224,59 @@ export default function WebGLGrass({ spherePosition }) {
     "Wind Speed": { value: 1.3, min: 0.0, max: 5.0, step: 0.1 },
   });
 
-  const geometry = useMemo(() => {
-    const width = 0.1;
-    const height = 0.6;
+    const geometry = useMemo(() => {
+      const width = 0.1;
+      const height = 0.6;
+  
+      const yPositions = [0.0, 0.6, 0.8, 1.0];
+  
+      const vertices = [];
+      const uvs = [];
+      const indices = [];
+  
+      // Create vertices - all levels except tip have 2 vertices
+      for (let y = 0; y < yPositions.length - 1; y++) {
+        const v = yPositions[y];
+        const taper = 1.0 - v * v * 0.9;
+  
+        vertices.push(-width * 0.5 * taper, v * height, 0);
+        vertices.push(width * 0.5 * taper, v * height, 0);
+  
+        uvs.push(0, v);
+        uvs.push(1, v);
+      }
+  
+      // Add single tip vertex
+      const tipV = yPositions[yPositions.length - 1];
+      vertices.push(0, tipV * height, 0); // Single vertex at center
+      uvs.push(0.5, tipV); // UV at center
+  
+      // Create indices - quads for body, triangles for tip
+      for (let y = 0; y < yPositions.length - 2; y++) {
+        const base = y * 2;
+        // Two triangles forming a quad
+        indices.push(base, base + 1, base + 2);
+        indices.push(base + 1, base + 3, base + 2);
+      }
+  
+      // Create tip triangle (connect last quad to single tip vertex)
+      const lastQuadBase = (yPositions.length - 2) * 2;
+      const tipVertexIndex = lastQuadBase + 2;
 
-    const yPositions = [0.0, 0.5, 0.8, 1.0];
-
-    const vertices = [];
-    const uvs = [];
-    const indices = [];
-
-    // Create vertices - all levels except tip have 2 vertices
-    for (let y = 0; y < yPositions.length - 1; y++) {
-      const v = yPositions[y];
-      const taper = 1.0 - v * v * 0.9;
-
-      vertices.push(-width * 0.5 * taper, v * height, 0);
-      vertices.push(width * 0.5 * taper, v * height, 0);
-
-      uvs.push(0, v);
-      uvs.push(1, v);
-    }
-
-    // Add single tip vertex
-    const tipV = yPositions[yPositions.length - 1];
-    vertices.push(0, tipV * height, 0); // Single vertex at center
-    uvs.push(0.5, tipV); // UV at center
-
-    // Create indices - quads for body, triangles for tip
-    for (let y = 0; y < yPositions.length - 2; y++) {
-      const base = y * 2;
-      // Two triangles forming a quad
-      indices.push(base, base + 1, base + 2);
-      indices.push(base + 1, base + 3, base + 2);
-    }
-
-    // Create tip triangles (connect last quad to single tip vertex)
-    const lastQuadBase = (yPositions.length - 2) * 2;
-    const tipVertexIndex = lastQuadBase + 2;
-
-    // Two triangles from last quad edges to tip
-    indices.push(lastQuadBase, lastQuadBase + 1, tipVertexIndex);
-    indices.push(lastQuadBase + 1, lastQuadBase, tipVertexIndex);
-
-    const geom = new THREE.BufferGeometry();
-    geom.setAttribute(
-      "position",
-      new THREE.Float32BufferAttribute(vertices, 3)
-    );
-    geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-    geom.setIndex(indices);
-    geom.computeVertexNormals();
-
-    return geom;
-  }, []);
+      // Single triangle from last quad edge to tip
+      indices.push(lastQuadBase, lastQuadBase + 1, tipVertexIndex);
+  
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(vertices, 3)
+      );
+      geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+      geom.setIndex(indices);
+      geom.computeVertexNormals();
+  
+      return geom;
+    }, []);
 
   const uniforms = useMemo(
     () => ({
