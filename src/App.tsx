@@ -1,9 +1,13 @@
-import React, { useRef, useState, useEffect } from "react";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import React, { useRef, useState, useEffect, useMemo } from "react";
+import { Canvas, extend, useFrame, useThree, type Catalogue } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
+import { mix, normalWorldGeometry, output, smoothstep, vec4 } from "three/tsl";
 import { useControls } from "leva";
-import WebGLGrass from "./WebGLGrass";
+import WebGPUGrass from "./WebGPUGrass";
+
+// Make R3F intrinsic elements resolve to the WebGPU build of three
+extend(THREE as unknown as Catalogue);
 
 const Ground = React.forwardRef(({ fieldSize = 50 }, ref) => {
   return (
@@ -14,8 +18,21 @@ const Ground = React.forwardRef(({ fieldSize = 50 }, ref) => {
   );
 });
 
-function KineticSphere({ onPositionChange, groundRef, grassHeight }) {
+function KineticSphere({ onPositionChange, groundRef }) {
   const meshRef = useRef<THREE.Mesh>(null);
+
+  const material = useMemo(() => {
+    const mat = new THREE.MeshStandardNodeMaterial({
+      roughness: 0.3,
+      metalness: 0.1,
+      color: "#F44",
+    });
+    // Fake ambient occlusion - darken the underside of the ball
+    const bottomFactor = smoothstep(-0.5, 0.2, normalWorldGeometry.y);
+    mat.outputNode = vec4(output.rgb.mul(mix(0.3, 1.0, bottomFactor)), output.a);
+    return mat;
+  }, []);
+  useEffect(() => () => material.dispose(), [material]);
   const velocity = useRef(new THREE.Vector3());
   const keys = useRef({ w: false, a: false, s: false, d: false });
   const mouseTarget = useRef(null);
@@ -157,47 +174,7 @@ function KineticSphere({ onPositionChange, groundRef, grassHeight }) {
   return (
     <mesh ref={meshRef} position={[0, 1.0, 0]}>
       <sphereGeometry args={[1.0, 32, 32]} />
-      <meshStandardMaterial
-        roughness={0.3}
-        metalness={0.1}
-        color="#F44"
-        onBeforeCompile={(shader) => {
-          shader.uniforms.grassHeight = { value: grassHeight };
-          shader.vertexShader = shader.vertexShader.replace(
-            '#include <common>',
-            `
-            #include <common>
-            varying vec3 vWorldNormal;
-            `
-          );
-          shader.vertexShader = shader.vertexShader.replace(
-            '#include <worldpos_vertex>',
-            `
-            #include <worldpos_vertex>
-            vWorldNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
-            `
-          );
-          shader.fragmentShader = shader.fragmentShader.replace(
-            '#include <common>',
-            `
-            #include <common>
-            uniform float grassHeight;
-            varying vec3 vWorldNormal;
-            `
-          );
-          shader.fragmentShader = shader.fragmentShader.replace(
-            '#include <dithering_fragment>',
-            `
-            #include <dithering_fragment>
-
-            // Fake ambient occlusion - darkening starts higher with taller grass
-            float bottomFactor = smoothstep(-0.5, 0.2, vWorldNormal.y);
-            gl_FragColor.rgb *= mix(0.3, 1., bottomFactor);
-            `
-          );
-          shader.customProgramCacheKey = grassHeight.toString();
-        }}
-      />
+      <primitive object={material} attach="material" />
     </mesh>
   );
 }
@@ -253,7 +230,7 @@ export default function App() {
   });
 
   // Get fieldSize from Grass component's Leva controls
-  const { "Field Size": fieldSize, "Wind Speed": windSpeed, "Blade Height": grassHeight } = useControls("🌿 Grass Field", {
+  const { "Field Size": fieldSize } = useControls("🌿 Grass Field", {
     "Blade Count": { value: 80_000, min: 1000, max: 500_000, step: 10_000 },
     "Blade Height": { value: 1.3, min: 0.7, max: 4.0, step: 0.1 },
     "Field Size": { value: 50, min: 10, max: 200, step: 5 },
@@ -281,10 +258,15 @@ export default function App() {
           WebkitUserSelect: "none",
           touchAction: "none"
         }}
-        gl={{
-          antialias: true,
-          alpha: false,
-          powerPreference: "high-performance",
+        gl={async ({ canvas }) => {
+          const renderer = new THREE.WebGPURenderer({
+            canvas: canvas as HTMLCanvasElement,
+            antialias: true,
+            alpha: false,
+            powerPreference: "high-performance",
+          });
+          await renderer.init();
+          return renderer;
         }}
       >
         <color attach="background" args={["#c2e2ff"]} />
@@ -293,11 +275,10 @@ export default function App() {
         {/* <pointLight position={[0, 8, 0]} intensity={0.8} color="#ffffff" /> */}
 
         <Ground ref={groundRef} fieldSize={fieldSize} />
-        <WebGLGrass spherePosition={spherePosition} windSpeed={windSpeed} grassHeight={grassHeight} />
+        <WebGPUGrass spherePosition={spherePosition} />
         <KineticSphere
           onPositionChange={setSpherePosition}
           groundRef={groundRef}
-          grassHeight={grassHeight}
         />
 
         <CameraController
