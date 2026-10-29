@@ -30,7 +30,13 @@ import {
   transformNormalToView,
   sign,
   varying,
+  select,
+  int,
 } from "three/tsl";
+
+// Trail map resolution (cells per side) and the ball's stamp radius
+const TRAIL_RES = 512;
+const TRAIL_RADIUS = 1.45;
 
 // Hash functions for pseudo-random numbers
 const hash11 = Fn(([pIn]: [THREE.Node<"float">]) => {
@@ -123,8 +129,64 @@ function createGrass(bladeCount: number) {
     grassHeight: uniform(1.3),
     cameraPos: uniform(new THREE.Vector3()),
     spherePosition: uniform(new THREE.Vector3(0, 1, 0)),
-    oldestTrailPosition: uniform(new THREE.Vector3(0, 1, 0)),
+    previousSpherePosition: uniform(new THREE.Vector3(0, 1, 0)),
+    trailDecay: uniform(1),
   };
+
+  // Trail map over the field: each cell holds the xz push vector (bend
+  // direction scaled by strength) that blades rooted there get
+  const trailMap = instancedArray(TRAIL_RES * TRAIL_RES, "vec2");
+
+  const clearTrail = Fn(() => {
+    trailMap.element(instanceIndex).assign(vec2(0.0));
+  })().compute(TRAIL_RES * TRAIL_RES);
+
+  // Fade the map back towards rest, then stamp the ball's footprint
+  const stampTrail = Fn(() => {
+    const cell = vec2(
+      float(instanceIndex.mod(TRAIL_RES)),
+      float(instanceIndex.div(TRAIL_RES))
+    );
+    const cellPos = cell.add(0.5).div(TRAIL_RES).sub(0.5).mul(uniforms.fieldSize);
+    const trail = trailMap.element(instanceIndex);
+    const faded = trail.mul(uniforms.trailDecay).toVar();
+
+    // Capsule from last frame's ball position to this frame's, so fast
+    // movement leaves a continuous trail
+    const segStart = uniforms.previousSpherePosition.xz;
+    const segment = uniforms.spherePosition.xz.sub(segStart);
+    const t = clamp(
+      dot(cellPos.sub(segStart), segment).div(max(dot(segment, segment), 1e-6)),
+      0.0,
+      1.0
+    );
+    const toCell = cellPos.sub(segStart.add(segment.mul(t)));
+    const distance = length(toCell);
+    const strength = smoothstep(
+      0.0,
+      1.0,
+      float(1.0).sub(distance.div(TRAIL_RADIUS))
+    ).mul(1.3);
+    const stamp = toCell.div(max(distance, 0.001)).mul(strength).toVar();
+
+    // Strongest push wins, so the stamp never weakens an existing trail
+    trail.assign(select(dot(stamp, stamp).greaterThan(dot(faded, faded)), stamp, faded));
+  })().compute(TRAIL_RES * TRAIL_RES);
+
+  // Bilinear sample of the trail map at a world xz position
+  const sampleTrail = Fn(([pos]: [THREE.Node<"vec2">]) => {
+    const coord = pos.div(uniforms.fieldSize).add(0.5).mul(TRAIL_RES).sub(0.5);
+    const f = fract(coord);
+    const c0 = clamp(floor(coord), 0.0, TRAIL_RES - 1);
+    const c1 = clamp(floor(coord).add(1.0), 0.0, TRAIL_RES - 1);
+    const at = (x: THREE.Node<"float">, y: THREE.Node<"float">) =>
+      trailMap.element(int(y).mul(TRAIL_RES).add(int(x)));
+    return mix(
+      mix(at(c0.x, c0.y), at(c1.x, c0.y), f.x),
+      mix(at(c0.x, c1.y), at(c1.x, c1.y), f.x),
+      f.y
+    );
+  });
 
   // Static per-blade data, written by the init pass (compute-only)
   const bladeBase = instancedArray(bladeCount, "vec4"); // posX, posZ, cosRot, sinRot
@@ -204,39 +266,17 @@ function createGrass(bladeCount: number) {
       .sub(windSpeed.mul(0.5))
       .toVar();
 
-    // Line-based bending for sphere trail
-    const influenceRadius = 1.45;
-    const lineStart = uniforms.oldestTrailPosition.xz;
-    const lineEnd = uniforms.spherePosition.xz;
-    const lineVector = lineEnd.sub(lineStart);
-    const safeLineLength = max(length(lineVector), 0.001);
-    const lineDirection = lineVector.div(safeLineLength);
+    // Ball trail from the trail map: push direction and strength
+    const trailBend = sampleTrail(grassPos).toVar();
 
-    const toGrass = grassPos.sub(lineStart);
-    const projectionLength = clamp(dot(toGrass, lineDirection), 0.0, safeLineLength);
-    const closestPointOnLine = lineStart.add(lineDirection.mul(projectionLength));
-    const toPoint = grassPos.sub(closestPointOnLine);
-    const distanceToLine = length(toPoint);
-
-    const positionAlongLine = projectionLength.div(safeLineLength);
-    const bendStrength = smoothstep(
-      0.0,
-      1.0,
-      float(1.0).sub(distanceToLine.div(influenceRadius))
-    )
-      .mul(smoothstep(0.0, 1.0, positionAlongLine))
-      .mul(1.3)
-      .toVar();
-    const awayDirection = toPoint.div(max(distanceToLine, 0.001));
-
-    // Wind and sphere both bend linearly with uv.y in xz and droop with uv.y^3
+    // Wind and trail both bend linearly with uv.y in xz and droop with uv.y^3
     const linearBend = vec2(totalWind, totalWind.mul(0.3))
-      .add(awayDirection.mul(bendStrength))
+      .add(trailBend)
       .toVar();
     const droop = totalWind
       .mul(totalWind)
       .mul(0.1)
-      .add(bendStrength.mul(bendStrength).mul(0.3))
+      .add(dot(trailBend, trailBend).mul(0.3))
       .toVar();
 
     // Single-sided rendering: if the camera sees the back of the blade, mirror
@@ -342,11 +382,13 @@ function createGrass(bladeCount: number) {
   return {
     uniforms,
     init,
+    clearTrail,
+    stampTrail,
     update,
     material,
     dispose: () => {
       material.dispose();
-      for (const buffer of buffers) buffer.value.dispose?.();
+      for (const buffer of [...buffers, trailMap]) buffer.value.dispose?.();
     },
   };
 }
@@ -357,7 +399,6 @@ export default function WebGPUGrass({
   spherePosition?: THREE.Vector3;
 }) {
   const renderer = useThree((state) => state.gl) as unknown as THREE.WebGPURenderer;
-  const oldestTrailPosition = useRef(new THREE.Vector3(0, 1, 0));
   const needsInit = useRef(true);
 
   const {
@@ -365,11 +406,13 @@ export default function WebGPUGrass({
     "Field Size": fieldSize,
     "Blade Height": bladeHeight,
     "Wind Speed": windSpeedLeva,
+    "Trail Recovery": trailRecovery,
   } = useControls("🌿 Grass Field", {
     "Blade Count": { value: 150000, min: 1000, max: 500000, step: 1000 },
     "Blade Height": { value: 1.3, min: 0.7, max: 4.0, step: 0.1 },
     "Field Size": { value: 50, min: 10, max: 200, step: 5 },
     "Wind Speed": { value: 1.3, min: 0.0, max: 5.0, step: 0.1 },
+    "Trail Recovery": { value: 2.0, min: 0.2, max: 20.0, step: 0.1 },
   });
 
   const geometry = useMemo(() => createBladeGeometry(bladeCount), [bladeCount]);
@@ -394,16 +437,19 @@ export default function WebGPUGrass({
     uniforms.time.value = state.clock.elapsedTime;
     uniforms.cameraPos.value.copy(state.camera.position);
 
+    uniforms.trailDecay.value = Math.exp(-delta / trailRecovery);
+
     if (spherePosition) {
-      oldestTrailPosition.current.lerp(spherePosition, delta * 0.6);
+      uniforms.previousSpherePosition.value.copy(uniforms.spherePosition.value);
       uniforms.spherePosition.value.copy(spherePosition);
-      uniforms.oldestTrailPosition.value.copy(oldestTrailPosition.current);
     }
 
     if (needsInit.current) {
       renderer.compute(grass.init);
+      renderer.compute(grass.clearTrail);
       needsInit.current = false;
     }
+    renderer.compute(grass.stampTrail);
     renderer.compute(grass.update);
   });
 
