@@ -28,10 +28,13 @@ import {
   uv,
   positionGeometry,
   transformNormalToView,
-  sign,
+  faceDirection,
   varying,
   select,
   int,
+  positionWorld,
+  cameraPosition,
+  saturate,
 } from "three/tsl";
 
 // Trail map resolution (cells per side) and the ball's stamp radius
@@ -130,15 +133,24 @@ function createGrass(bladeCount: number) {
     cameraPos: uniform(new THREE.Vector3()),
     spherePosition: uniform(new THREE.Vector3(0, 1, 0)),
     previousSpherePosition: uniform(new THREE.Vector3(0, 1, 0)),
-    trailDecay: uniform(1),
+    trailFadeStep: uniform(0),
+    tipTint: uniform(new THREE.Vector3(1.0, 0.9, 0.6)),
+    sunDirection: uniform(new THREE.Vector3(0, 1, 0)),
+    translucency: uniform(0),
+    specular: uniform(new THREE.Color(0x000000)),
+    ridge: uniform(0.6),
   };
 
   // Trail map over the field: each cell holds the xz push vector (bend
-  // direction scaled by strength) that blades rooted there get
-  const trailMap = instancedArray(TRAIL_RES * TRAIL_RES, "vec2");
+  // direction scaled by strength) that blades rooted there get, plus a life
+  // that counts down from 1 so the blades recover with an ease-out
+  const trailMap = instancedArray(TRAIL_RES * TRAIL_RES, "vec4");
+
+  // Springs up fast, then settles gently into rest over a fixed time
+  const recovery = (life: THREE.Node<"float">) => life.mul(life);
 
   const clearTrail = Fn(() => {
-    trailMap.element(instanceIndex).assign(vec2(0.0));
+    trailMap.element(instanceIndex).assign(vec4(0.0));
   })().compute(TRAIL_RES * TRAIL_RES);
 
   // Fade the map back towards rest, then stamp the ball's footprint
@@ -149,7 +161,8 @@ function createGrass(bladeCount: number) {
     );
     const cellPos = cell.add(0.5).div(TRAIL_RES).sub(0.5).mul(uniforms.fieldSize);
     const trail = trailMap.element(instanceIndex);
-    const faded = trail.mul(uniforms.trailDecay).toVar();
+    const life = max(trail.z.sub(uniforms.trailFadeStep), 0.0);
+    const current = trail.xy.mul(recovery(life)).toVar();
 
     // Capsule from last frame's ball position to this frame's, so fast
     // movement leaves a continuous trail
@@ -170,7 +183,13 @@ function createGrass(bladeCount: number) {
     const stamp = toCell.div(max(distance, 0.001)).mul(strength).toVar();
 
     // Strongest push wins, so the stamp never weakens an existing trail
-    trail.assign(select(dot(stamp, stamp).greaterThan(dot(faded, faded)), stamp, faded));
+    trail.assign(
+      select(
+        dot(stamp, stamp).greaterThan(dot(current, current)),
+        vec4(stamp, 1.0, 0.0),
+        vec4(trail.xy, life, 0.0)
+      )
+    );
   })().compute(TRAIL_RES * TRAIL_RES);
 
   // Bilinear sample of the trail map at a world xz position
@@ -181,11 +200,12 @@ function createGrass(bladeCount: number) {
     const c1 = clamp(floor(coord).add(1.0), 0.0, TRAIL_RES - 1);
     const at = (x: THREE.Node<"float">, y: THREE.Node<"float">) =>
       trailMap.element(int(y).mul(TRAIL_RES).add(int(x)));
-    return mix(
+    const trail = mix(
       mix(at(c0.x, c0.y), at(c1.x, c0.y), f.x),
       mix(at(c0.x, c1.y), at(c1.x, c1.y), f.x),
       f.y
     );
+    return trail.xy.mul(recovery(trail.z));
   });
 
   // Static per-blade data, written by the init pass (compute-only)
@@ -195,7 +215,7 @@ function createGrass(bladeCount: number) {
 
   // Per-frame per-blade data, packed for the vertex shader (3 vec4 per vertex)
   const bladeXform = instancedArray(bladeCount, "vec4"); // posX, posZ, scaled blade x axis
-  const bladeBend = instancedArray(bladeCount, "vec4"); // linear bend.xz, cubic droop, signed height
+  const bladeBend = instancedArray(bladeCount, "vec4"); // linear bend.xz, cubic droop, height
   const bladeLook = instancedArray(bladeCount, "vec4"); // restBend.xz, colorVar, shade
 
   const init = Fn(() => {
@@ -279,27 +299,12 @@ function createGrass(bladeCount: number) {
       .add(dot(trailBend, trailBend).mul(0.3))
       .toVar();
 
-    // Single-sided rendering: if the camera sees the back of the blade, mirror
-    // it across its local x. The blade is symmetric so the shape is identical,
-    // but the winding flips so the front face points at the camera.
-    // Facing is tested against the base-to-tip vector, including all bends
-    // (0.6 is the unscaled geometry height)
-    const tip = vec3(
-      restBend.x.add(linearBend.x),
-      heightVar.mul(0.6).sub(dot(restBend, restBend).mul(0.2)).sub(droop),
-      restBend.y.add(linearBend.y)
+    // Flattened blades are seen face-on from above, so drop the edge-on
+    // thickening or they smear into wide ribbons
+    const upright = smoothstep(0.0, 0.8, length(trailBend)).oneMinus();
+    const xAxis = vec2(cosRot, sinRot).mul(
+      widthVar.add(thicken.mul(4.0).mul(upright))
     );
-    const faceNormal = vec3(
-      sinRot.mul(tip.y).negate(),
-      sinRot.mul(tip.x).sub(cosRot.mul(tip.z)),
-      cosRot.mul(tip.y)
-    );
-    const toCamera = uniforms.cameraPos.sub(
-      vec3(grassPos.x, 0.0, grassPos.y).add(tip.mul(0.5))
-    );
-    const flip = step(0.0, dot(faceNormal, toCamera)).mul(2.0).sub(1.0);
-
-    const xAxis = vec2(cosRot, sinRot).mul(widthVar.add(thicken.mul(4.0))).mul(flip);
 
     // Shadow effect from sphere
     const distanceToSphere = length(grassPos.sub(uniforms.spherePosition.xz));
@@ -308,7 +313,7 @@ function createGrass(bladeCount: number) {
     bladeXform.element(instanceIndex).assign(vec4(grassPos, xAxis));
     bladeBend
       .element(instanceIndex)
-      .assign(vec4(linearBend, droop, heightVar.mul(flip)));
+      .assign(vec4(linearBend, droop, heightVar));
     bladeLook
       .element(instanceIndex)
       .assign(vec4(restBend, colorVar, shadowStrength.oneMinus()));
@@ -321,7 +326,7 @@ function createGrass(bladeCount: number) {
   const uvY = uv().y;
 
   const position = Fn(() => {
-    const heightVar = abs(bend.w);
+    const heightVar = bend.w;
     const restBend = look.xy;
 
     const uvY2 = uvY.mul(uvY);
@@ -356,26 +361,71 @@ function createGrass(bladeCount: number) {
     const lightIntensity = mix(linearModifier, tipModifier, step(0.75, uvY));
     const lightColor = mix(
       vec3(1.0),
-      vec3(1.0, 0.9, 0.6),
+      uniforms.tipTint,
       smoothstep(1.0, 1.5, lightIntensity)
     );
     return tint.mul(shade).mul(lightColor).mul(lightIntensity);
   })();
 
-  // Rounded normal for cylindrical appearance, rotated with the blade.
-  // axis is the (possibly mirrored) blade x direction; for mirrored blades the
-  // roundness flips too so shading matches what the back face looked like
   const axis = normalize(xform.zw);
-  const flip = sign(bend.w);
-  const roundness = uv().x.sub(0.5).mul(2.0).mul(0.75).mul(flip);
-  const normalXZ = axis.mul(roundness).add(vec2(axis.y.negate(), axis.x));
-  const localNormal = normalize(vec3(normalXZ.x, 0.0, normalXZ.y));
-  const normal = varying(transformNormalToView(localNormal)).normalize();
 
-  const material = new THREE.MeshLambertNodeMaterial();
+  // Face normal follows the bend: cross of the blade x axis with the tangent
+  // up the blade (derivative of the bent position with respect to uv.y)
+  const restBend = look.xy;
+  const tangentXZ = restBend.mul(uvY.mul(2.0)).add(bend.xy);
+  const tangentY = bend.w
+    .mul(0.6)
+    .sub(dot(restBend, restBend).mul(pow(uvY, 4.0)))
+    .sub(bend.z.mul(3.0).mul(uvY.mul(uvY)));
+  const faceNormal = normalize(
+    vec3(
+      axis.y.mul(tangentY).negate(),
+      axis.y.mul(tangentXZ.x).sub(axis.x.mul(tangentXZ.y)),
+      axis.x.mul(tangentY)
+    )
+  );
+
+  // Normal tilts across the blade, blended from a round profile to a
+  // V-shaped midrib ridge. Done per fragment since the blade has no centre
+  // vertices; the soft sign keeps the crease from aliasing. Flipped for
+  // back faces
+  const bladeX = uv().x.sub(0.5).mul(2.0);
+  const roundTilt = bladeX.mul(0.75);
+  const ridgeTilt = bladeX.div(abs(bladeX).add(0.12)).mul(0.6);
+  const localNormal = normalize(
+    varying(faceNormal).add(
+      varying(vec3(axis.x, 0.0, axis.y)).mul(mix(roundTilt, ridgeTilt, uniforms.ridge))
+    )
+  );
+  const normal = transformNormalToView(localNormal)
+    .normalize()
+    .mul(faceDirection);
+
+  // Backlit glow: sunlight shining through blades seen against the sun.
+  // Compared in the ground plane so a high sun still reads from a
+  // downward-looking camera. Uses the flat face normal so only blades
+  // turned with their back to the sun light up, each with a lime streak
+  // down its middle fading to green edges
+  const backlight = Fn(() => {
+    const toFragment = normalize(positionWorld.xz.sub(cameraPosition.xz));
+    const sunXZ = normalize(uniforms.sunDirection.xz);
+    const against = smoothstep(-0.3, 1.0, dot(toFragment, sunXZ));
+    const cameraSideFace = varying(faceNormal).normalize().mul(faceDirection);
+    const facing = saturate(dot(cameraSideFace.xz, sunXZ).negate());
+    const across = abs(uv().x.sub(0.5)).mul(2.0);
+    const streak = float(1.0).sub(across.mul(across));
+    const glow = against.mul(facing.mul(facing)).mul(streak).mul(uvY.mul(0.6).add(0.4));
+    const glowColor = mix(vec3(0.12, 0.45, 0.03), vec3(0.4, 0.8, 0.05), streak.mul(streak));
+    return glowColor.mul(glow).mul(uniforms.translucency);
+  })();
+
+  const material = new THREE.MeshPhongNodeMaterial({ side: THREE.DoubleSide });
   material.positionNode = position;
   material.colorNode = varying(color);
   material.normalNode = normal;
+  material.emissiveNode = backlight;
+  // Fake AO: speculars strongest at the tips, fading into the dense base
+  material.specularNode = uniforms.specular.mul(smoothstep(0.0, 1.0, uvY));
 
   const buffers = [bladeBase, bladeShape, bladeParams, bladeXform, bladeBend, bladeLook];
 
@@ -393,10 +443,23 @@ function createGrass(bladeCount: number) {
   };
 }
 
+export type GrassLook = {
+  specular: string;
+  shininess: number;
+  // Raw (non color-managed) tint multiplied into bright blade tips
+  tipTint: [number, number, number];
+  // Strength of the backlit glow, 0 disables it
+  translucency: number;
+};
+
 export default function WebGPUGrass({
   spherePosition,
+  look,
+  sunPosition,
 }: {
   spherePosition?: THREE.Vector3;
+  look: GrassLook;
+  sunPosition: [number, number, number];
 }) {
   const renderer = useThree((state) => state.gl) as unknown as THREE.WebGPURenderer;
   const needsInit = useRef(true);
@@ -407,12 +470,14 @@ export default function WebGPUGrass({
     "Blade Height": bladeHeight,
     "Wind Speed": windSpeedLeva,
     "Trail Recovery": trailRecovery,
+    "Blade Ridge": bladeRidge,
   } = useControls("🌿 Grass Field", {
     "Blade Count": { value: 150000, min: 1000, max: 500000, step: 1000 },
     "Blade Height": { value: 1.3, min: 0.7, max: 4.0, step: 0.1 },
     "Field Size": { value: 50, min: 10, max: 200, step: 5 },
     "Wind Speed": { value: 1.3, min: 0.0, max: 5.0, step: 0.1 },
-    "Trail Recovery": { value: 2.0, min: 0.2, max: 20.0, step: 0.1 },
+    "Trail Recovery": { value: 3.0, min: 0.2, max: 20.0, step: 0.1 },
+    "Blade Ridge": { value: 0.6, min: 0.0, max: 1.0, step: 0.05 },
   });
 
   const geometry = useMemo(() => createBladeGeometry(bladeCount), [bladeCount]);
@@ -432,12 +497,24 @@ export default function WebGPUGrass({
     grass.uniforms.windSpeed.value = windSpeedLeva;
   }, [grass, windSpeedLeva]);
 
+  useEffect(() => {
+    grass.uniforms.ridge.value = bladeRidge;
+  }, [grass, bladeRidge]);
+
+  useEffect(() => {
+    grass.uniforms.specular.value.set(look.specular);
+    grass.material.shininess = look.shininess;
+    grass.uniforms.tipTint.value.fromArray(look.tipTint);
+    grass.uniforms.translucency.value = look.translucency;
+    grass.uniforms.sunDirection.value.fromArray(sunPosition).normalize();
+  }, [grass, look, sunPosition]);
+
   useFrame((state, delta) => {
     const { uniforms } = grass;
     uniforms.time.value = state.clock.elapsedTime;
     uniforms.cameraPos.value.copy(state.camera.position);
 
-    uniforms.trailDecay.value = Math.exp(-delta / trailRecovery);
+    uniforms.trailFadeStep.value = delta / trailRecovery;
 
     if (spherePosition) {
       uniforms.previousSpherePosition.value.copy(uniforms.spherePosition.value);

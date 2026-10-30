@@ -4,10 +4,70 @@ import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three/webgpu";
 import { mix, normalWorldGeometry, output, smoothstep, vec4 } from "three/tsl";
 import { useControls } from "leva";
-import WebGPUGrass from "./WebGPUGrass";
+import WebGPUGrass, { type GrassLook } from "./WebGPUGrass";
 
 // Make R3F intrinsic elements resolve to the WebGPU build of three
 extend(THREE as unknown as Catalogue);
+
+type ScenePreset = {
+  background: string;
+  fog?: { color: string; near: number; far: number };
+  ambient: { color: string; intensity: number };
+  light: {
+    position: [number, number, number];
+    color: string;
+    intensity: number;
+  };
+  moon?: { position: [number, number, number]; radius: number; color: string };
+  grass: GrassLook;
+};
+
+const SCENES: Record<string, ScenePreset> = {
+  Day: {
+    background: "#c2e2ff",
+    ambient: { color: "#ffffff", intensity: 0.4 },
+    light: { position: [10, 10, 5], color: "#FFFFCC", intensity: 1 },
+    grass: { specular: "#55554a", shininess: 30, tipTint: [1.0, 0.9, 0.6], translucency: 0.35 },
+  },
+  Moon: {
+    background: "#070b16",
+    fog: { color: "#070b16", near: 60, far: 150 },
+    ambient: { color: "#7086cc", intensity: 1.4 },
+    // Same general direction as the Day sun
+    light: { position: [45, 50, 22], color: "#b4d6c4", intensity: 1.6 },
+    moon: { position: [225, 250, 110], radius: 9, color: "#eef2ff" },
+    grass: { specular: "#90a89a", shininess: 24, tipTint: [0.75, 0.85, 1.0], translucency: 0 },
+  },
+};
+
+function SceneLighting({ preset }: { preset: ScenePreset }) {
+  return (
+    <>
+      <color attach="background" args={[preset.background]} />
+      {preset.fog && (
+        <fog
+          attach="fog"
+          args={[preset.fog.color, preset.fog.near, preset.fog.far]}
+        />
+      )}
+      <ambientLight
+        color={preset.ambient.color}
+        intensity={preset.ambient.intensity}
+      />
+      <directionalLight
+        position={preset.light.position}
+        color={preset.light.color}
+        intensity={preset.light.intensity}
+      />
+      {preset.moon && (
+        <mesh position={preset.moon.position}>
+          <sphereGeometry args={[preset.moon.radius, 32, 16]} />
+          <meshBasicMaterial color={preset.moon.color} fog={false} />
+        </mesh>
+      )}
+    </>
+  );
+}
 
 const Ground = React.forwardRef(({ fieldSize = 50 }, ref) => {
   return (
@@ -222,12 +282,14 @@ export default function App() {
   
 
   // Project description in Leva
-  useControls("Controls", {
+  const { Scene: sceneName } = useControls("Controls", {
     "Controls": {
       value: "WASD/Mouse: Move ball, C: Toggle camera",
       editable: false
-    }
+    },
+    Scene: { value: "Day", options: Object.keys(SCENES) },
   });
+  const scene = SCENES[sceneName];
 
   // Get fieldSize from Grass component's Leva controls
   const { "Field Size": fieldSize } = useControls("🌿 Grass Field", {
@@ -269,13 +331,10 @@ export default function App() {
           return renderer;
         }}
       >
-        <color attach="background" args={["#c2e2ff"]} />
-        <ambientLight intensity={0.4} />
-        <directionalLight position={[10, 10, 5]} intensity={1} color="#FFFFCC" />
-        {/* <pointLight position={[0, 8, 0]} intensity={0.8} color="#ffffff" /> */}
+        <SceneLighting key={sceneName} preset={scene} />
 
         <Ground ref={groundRef} fieldSize={fieldSize} />
-        <WebGPUGrass spherePosition={spherePosition} />
+        <WebGPUGrass spherePosition={spherePosition} look={scene.grass} sunPosition={scene.light.position} />
         <KineticSphere
           onPositionChange={setSpherePosition}
           groundRef={groundRef}
